@@ -48,6 +48,8 @@ Actual prerequisites: a C++17 compiler (GCC 7+ or Clang 6+), CMake 3.16+, and
 ## Usage
 
 ```bash
+./build/retroemu --info roms/acid2/dmg-acid2.gb    # decode one cartridge header
+./build/retroemu --list roms/**/*.gb               # one summary line per ROM
 ./build/retroemu                      # open the window
 ./build/retroemu --scale 6            # window magnified x6
 ./build/retroemu --selftest           # check the graphics pipeline, no window
@@ -69,7 +71,7 @@ the test bundle before moving on.
 |---|---|---|
 | 0 | Hexadecimal / bitwise warm-up | done |
 | 1 | CMake skeleton + SDL2 + 160x144 window | done |
-| 2 | Cartridge: ROM loading and header parsing | todo |
+| 2 | Cartridge: ROM loading and header parsing | done |
 | 3 | Bus / MMU with tick-on-access | todo |
 | 4 | CPU: registers, flags, instruction set | todo |
 | 5 | Disassembler and debugger *(subject V.1)* | todo |
@@ -86,6 +88,19 @@ the test bundle before moving on.
 
 ---
 
+## Tests
+
+```bash
+./tests/run_cartridge_tests.sh
+```
+
+Checks the parsed summary of the nine bundled ROMs against a golden file and
+exercises the malformed-input paths (missing, empty, truncated and corrupted
+files). Pass `--update` to regenerate the golden file after an intentional
+format change.
+
+---
+
 ## Repository layout
 
 ```
@@ -96,10 +111,12 @@ RetroEmu/
 │   ├── core/               CPU, bus, PPU, timer, cartridge...
 │   ├── debug/              disassembler, tracer, debugger
 │   └── front/              SDL2, user interface
-├── src/                    implementations
+├── src/
+│   ├── main.cpp            entry point and CLI
+│   └── core/               emulator core (no SDL here)
 ├── roms/                   MIT test bundle (versioned)
 ├── roms-dev/               development ROMs (gitignored)
-├── tests/                  unit tests and scripts
+├── tests/                  regression scripts and golden files
 └── docs/
     ├── decisions.md        technical decision log
     └── step0/bitwise.cpp   hexadecimal / bitwise training ground

@@ -174,3 +174,37 @@ your peer evaluators." (p.6). No language constraint exists.
 README and documentation. Identifiers already follow hardware terminology
 (`LCDC`, `SCX`, `OAM`), so a single language throughout keeps the codebase
 consistent and readable by any evaluator.
+
+---
+
+## D11 — The Nintendo logo is not verified
+
+**Context.** Real hardware compares the 48 bytes at 0x0104-0x0133 against a
+copy held in the boot ROM and refuses to run the cartridge when they differ.
+
+**Decision.** That check is deliberately not implemented. Performing it would
+mean embedding the logo bitmap in this repository, and the subject (Ch. VI,
+p.9) states that this artwork is protected and must not be shipped. Since the
+mandatory part skips the boot ROM entirely (ambiguity A3), nothing depends on
+it: every ROM is accepted regardless of the logo bytes.
+
+Should the "Boot sequence" bonus be attempted later, the logo would come from
+the open-source boot ROM chosen at that point, never from this repository.
+
+---
+
+## D12 — Error handling policy
+
+**Context (A6).** The subject states no error-handling requirement at all.
+
+**Decision.** Two tiers, so that nothing ever crashes in front of a corrector:
+
+- **Fatal** (load refused, exit code 1): the file cannot be opened, is empty,
+  or is shorter than the 336-byte header. There is nothing to emulate.
+- **Warning** (load succeeds, message printed): bad header checksum, ROM size
+  that disagrees with the file size, unknown cartridge type or RAM size code.
+  Real hardware would halt on a bad header checksum, but since the mandatory
+  part skips the boot ROM there is no reason to refuse the ROM.
+
+Rationale: a corrector handing over an unusual homebrew ROM should see a clear
+diagnostic, not a crash and not a silent wrong result.

@@ -1,0 +1,132 @@
+#pragma once
+// ===========================================================================
+//  Cartridge: ROM loading and header parsing.
+// ===========================================================================
+//  Every cartridge carries a 336-byte header at 0x0100-0x014F describing what
+//  the hardware inside it is. Three bytes of that header decide the whole
+//  shape of the emulator:
+//
+//      0x0143  CGB flag       -> DMG or CGB behaviour        (subject V.6)
+//      0x0147  cartridge type -> which MBC, RAM, battery     (subject V.5)
+//      0x0148  ROM size       -> how many 16 KiB banks exist (subject V.5)
+//
+//  This step only READS the header. Actually mapping the banks is the job of
+//  the MBC implementations in step 13.
+// ===========================================================================
+
+#include <string>
+#include <vector>
+
+#include "retroemu/core/types.hpp"
+
+namespace retroemu {
+
+// --- Memory bank controller family ----------------------------------------
+enum class MbcType {
+    None,          // no controller at all: a flat 32 KiB ROM
+    Mbc1,          // mandatory (subject V.5)
+    Mbc2,          // mandatory (subject V.5)
+    Mbc3,          // bonus (subject Ch. VI)
+    Mbc5,          // mandatory (subject V.5)
+    Mbc6,
+    Mbc7,
+    Mmm01,
+    HuC1,
+    HuC3,
+    PocketCamera,
+    BandaiTama5,
+    Unknown,
+};
+
+// --- Colour model declared by the cartridge (header byte 0x0143) -----------
+enum class CgbSupport {
+    None,          // value < 0x80: DMG cartridge, the byte is part of the title
+    Enhanced,      // 0x80: uses CGB features but still runs on a DMG
+    Only,          // 0xC0: refuses to run on a DMG
+};
+
+// --- Everything the header tells us ----------------------------------------
+struct CartridgeHeader {
+    std::string title;              // 0x0134..0x0142/0x0143
+    std::string manufacturer_code;  // 0x013F..0x0142, newer cartridges only
+    std::string licensee_code;      // 0x0144..0x0145 (new) or 0x014B (old)
+
+    CgbSupport  cgb        = CgbSupport::None;   // 0x0143
+    bool        sgb        = false;              // 0x0146 == 0x03
+
+    u8          type_code  = 0;                  // 0x0147, raw value
+    MbcType     mbc        = MbcType::None;
+    bool        has_ram    = false;
+    bool        has_battery = false;
+    bool        has_timer  = false;              // real time clock (MBC3)
+    bool        has_rumble = false;              // MBC5/MBC7
+
+    u8          rom_size_code = 0;               // 0x0148
+    std::size_t rom_size      = 0;               // in bytes
+    unsigned    rom_banks     = 0;               // 16 KiB each
+
+    u8          ram_size_code = 0;               // 0x0149
+    std::size_t ram_size      = 0;               // in bytes
+    unsigned    ram_banks     = 0;               // 8 KiB each
+
+    u8          destination_code = 0;            // 0x014A: 0 = Japan
+    u8          rom_version      = 0;            // 0x014C
+
+    u8          header_checksum          = 0;    // 0x014D, as stored
+    u8          computed_header_checksum = 0;
+    u16         global_checksum          = 0;    // 0x014E..0x014F, big-endian
+    u16         computed_global_checksum = 0;
+
+    // Non-fatal oddities worth reporting (size mismatch, bad checksum, ...).
+    std::vector<std::string> warnings;
+
+    bool header_checksum_valid() const { return header_checksum == computed_header_checksum; }
+    bool global_checksum_valid() const { return global_checksum == computed_global_checksum; }
+};
+
+// --- Human-readable names --------------------------------------------------
+const char *to_string(MbcType mbc);
+const char *to_string(CgbSupport cgb);
+
+// Full name of a raw 0x0147 value, e.g. 0x03 -> "MBC1+RAM+BATTERY".
+const char *cartridge_type_name(u8 type_code);
+
+// True for the controllers this emulator is required to support
+// (subject V.5: ROM only, MBC1, MBC2, MBC5).
+bool is_mandatory_mbc(MbcType mbc);
+
+// --- Checksums -------------------------------------------------------------
+//  Header checksum, over 0x0134..0x014C:
+//      checksum = 0; for each byte: checksum = checksum - byte - 1
+//  On real hardware the boot ROM halts the console when this does not match.
+u8 compute_header_checksum(const std::vector<u8> &rom);
+
+//  Global checksum: 16-bit sum of every ROM byte except the two checksum
+//  bytes themselves. Real hardware never verifies it.
+u16 compute_global_checksum(const std::vector<u8> &rom);
+
+// --- Parsing ---------------------------------------------------------------
+//  Returns false and fills `error` when the data cannot be a cartridge at all.
+//  Recoverable oddities land in `out.warnings` instead.
+bool parse_header(const std::vector<u8> &rom, CartridgeHeader &out, std::string &error);
+
+// ---------------------------------------------------------------------------
+//  A loaded cartridge: the raw ROM bytes plus its parsed header.
+// ---------------------------------------------------------------------------
+class Cartridge {
+public:
+    // Returns false and fills `error` on failure. The object is left empty.
+    bool load_from_file(const std::string &path, std::string &error);
+
+    bool                    loaded() const { return !rom_.empty(); }
+    const std::string      &path()   const { return path_; }
+    const std::vector<u8>  &rom()    const { return rom_; }
+    const CartridgeHeader  &header() const { return header_; }
+
+private:
+    std::string       path_;
+    std::vector<u8>   rom_;
+    CartridgeHeader   header_;
+};
+
+}  // namespace retroemu

@@ -1,0 +1,11 @@
+FILE                                       TITLE            CGB       CARTRIDGE TYPE           ROM       RAM       HDR
+------------------------------------------ ---------------- --------- ------------------------ --------- --------- ---
+roms/acid2/cgb-acid2.gbc                   CGB-ACID2        only      ROM ONLY                 32 KiB    none      ok
+roms/acid2/dmg-acid2.gb                    DMG-ACID2        no        ROM ONLY                 32 KiB    none      ok
+roms/mooneye/acceptance/div_timing.gb      mooneye-gb test  no        ROM ONLY                 32 KiB    none      ok
+roms/mooneye/acceptance/intr_timing.gb     mooneye-gb test  no        ROM ONLY                 32 KiB    none      ok
+roms/mooneye/acceptance/oam_dma/basic.gb   mooneye-gb test  no        ROM ONLY                 32 KiB    none      ok
+roms/mooneye/mbc1/ram_64kb.gb              mooneye-gb test  no        MBC1+RAM+BATTERY         64 KiB    8 KiB     ok
+roms/mooneye/mbc1/rom_512kb.gb             mooneye-gb test  no        MBC1                     64 KiB    none      ok
+roms/mooneye/mbc2/ram.gb                   mooneye-gb test  no        MBC2+BATTERY             32 KiB    512x4b    ok
+roms/mooneye/mbc5/rom_2Mb.gb               mooneye-gb test  no        MBC5                     256 KiB   none      ok

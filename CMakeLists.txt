@@ -46,6 +46,7 @@ include(SDL2Setup)
 # --- The executable --------------------------------------------------------
 add_executable(retroemu
     src/main.cpp
+    src/core/cartridge.cpp
 )
 
 target_include_directories(retroemu PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")

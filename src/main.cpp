@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "retroemu/core/cartridge.hpp"
 #include "retroemu/core/types.hpp"
 
 namespace {
@@ -240,6 +241,150 @@ int run_window(int scale)
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+//  Cartridge report (step 2).
+// ---------------------------------------------------------------------------
+const char *yes_no(bool b) { return b ? "yes" : "no"; }
+
+std::string human_size(std::size_t bytes)
+{
+    char buf[64];
+    if (bytes == 0)               std::snprintf(buf, sizeof(buf), "none");
+    else if (bytes < 1024)        std::snprintf(buf, sizeof(buf), "%zu bytes", bytes);
+    else if (bytes < 1024 * 1024) std::snprintf(buf, sizeof(buf), "%zu KiB", bytes / 1024);
+    else                          std::snprintf(buf, sizeof(buf), "%zu MiB", bytes / (1024 * 1024));
+    return buf;
+}
+
+const char *cgb_short(retroemu::CgbSupport c)
+{
+    switch (c) {
+        case retroemu::CgbSupport::None:     return "no";
+        case retroemu::CgbSupport::Enhanced: return "enhanced";
+        case retroemu::CgbSupport::Only:     return "only";
+    }
+    return "?";
+}
+
+// Detailed block, one cartridge per call.
+void print_cartridge_info(const retroemu::Cartridge &cart)
+{
+    const retroemu::CartridgeHeader &h = cart.header();
+
+    std::printf("File            : %s\n", cart.path().c_str());
+    std::printf("File size       : %zu bytes (%s)\n",
+                cart.rom().size(), human_size(cart.rom().size()).c_str());
+    std::printf("\n");
+
+    std::printf("Title           : %s\n", h.title.empty() ? "(none)" : h.title.c_str());
+    if (!h.manufacturer_code.empty())
+        std::printf("Manufacturer    : %s\n", h.manufacturer_code.c_str());
+    std::printf("Licensee        : %s\n",
+                h.licensee_code.empty() ? "(none)" : h.licensee_code.c_str());
+    std::printf("CGB support     : 0x%02X  %s\n",
+                h.cgb == retroemu::CgbSupport::Only     ? 0xC0 :
+                h.cgb == retroemu::CgbSupport::Enhanced ? 0x80 : 0x00,
+                retroemu::to_string(h.cgb));
+    std::printf("SGB support     : %s\n", yes_no(h.sgb));
+    std::printf("Destination     : %s\n", h.destination_code == 0x00 ? "Japan" : "overseas");
+    std::printf("ROM version     : %u\n", h.rom_version);
+    std::printf("\n");
+
+    std::printf("Cartridge type  : 0x%02X  %s\n",
+                h.type_code, retroemu::cartridge_type_name(h.type_code));
+    const char *mbc_note = retroemu::is_mandatory_mbc(h.mbc)      ? ""
+                         : h.mbc == retroemu::MbcType::Unknown     ? "   (unsupported)"
+                         : h.mbc == retroemu::MbcType::Mbc3        ? "   (bonus part of the subject)"
+                                                                   : "   (not required by the subject)";
+    std::printf("  MBC           : %s%s\n", retroemu::to_string(h.mbc), mbc_note);
+    std::printf("  External RAM  : %s\n", yes_no(h.has_ram));
+    std::printf("  Battery       : %s\n", yes_no(h.has_battery));
+    std::printf("  RTC           : %s\n", yes_no(h.has_timer));
+    std::printf("  Rumble        : %s\n", yes_no(h.has_rumble));
+    std::printf("\n");
+
+    std::printf("ROM size        : 0x%02X  %s (%u banks of 16 KiB)\n",
+                h.rom_size_code, human_size(h.rom_size).c_str(), h.rom_banks);
+    if (h.mbc == retroemu::MbcType::Mbc2)
+        std::printf("RAM size        : 0x%02X  512 x 4 bits, built into the MBC2 chip\n",
+                    h.ram_size_code);
+    else
+        std::printf("RAM size        : 0x%02X  %s%s\n",
+                    h.ram_size_code, human_size(h.ram_size).c_str(),
+                    h.ram_banks > 0 ? "" : "");
+    std::printf("\n");
+
+    std::printf("Header checksum : 0x%02X  (computed 0x%02X)  %s\n",
+                h.header_checksum, h.computed_header_checksum,
+                h.header_checksum_valid() ? "ok" : "MISMATCH");
+    std::printf("Global checksum : 0x%04X (computed 0x%04X)  %s\n",
+                h.global_checksum, h.computed_global_checksum,
+                h.global_checksum_valid() ? "ok" : "mismatch (never checked by hardware)");
+
+    if (!h.warnings.empty()) {
+        std::printf("\nWarnings:\n");
+        for (const std::string &w : h.warnings) std::printf("  - %s\n", w.c_str());
+    }
+}
+
+void print_list_header()
+{
+    std::printf("%-42s %-16s %-9s %-24s %-9s %-9s %s\n",
+                "FILE", "TITLE", "CGB", "CARTRIDGE TYPE", "ROM", "RAM", "HDR");
+    std::printf("%-42s %-16s %-9s %-24s %-9s %-9s %s\n",
+                "------------------------------------------", "----------------", "---------",
+                "------------------------", "---------", "---------", "---");
+}
+
+// One compact row per cartridge.
+void print_cartridge_row(const retroemu::Cartridge &cart)
+{
+    const retroemu::CartridgeHeader &h = cart.header();
+    const std::string ram = (h.mbc == retroemu::MbcType::Mbc2)
+                                ? std::string("512x4b")
+                                : human_size(h.ram_size);
+
+    std::printf("%-42s %-16s %-9s %-24s %-9s %-9s %s\n",
+                cart.path().c_str(),
+                h.title.empty() ? "-" : h.title.c_str(),
+                cgb_short(h.cgb),
+                retroemu::cartridge_type_name(h.type_code),
+                human_size(h.rom_size).c_str(),
+                ram.c_str(),
+                h.header_checksum_valid() ? "ok" : "BAD");
+}
+
+// Shared driver for --info and --list. Returns a process exit code.
+int run_cartridge_report(char *argv[], int first, int argc, bool compact)
+{
+    if (first >= argc) {
+        std::fprintf(stderr, "expected at least one ROM file\n");
+        return 1;
+    }
+
+    int failures = 0;
+    if (compact) print_list_header();
+
+    for (int i = first; i < argc; ++i) {
+        retroemu::Cartridge cart;
+        std::string error;
+
+        if (!cart.load_from_file(argv[i], error)) {
+            std::fprintf(stderr, "%s: %s\n", argv[i], error.c_str());
+            ++failures;
+            continue;
+        }
+
+        if (compact) {
+            print_cartridge_row(cart);
+        } else {
+            if (i > first) std::printf("\n%s\n\n", std::string(60, '-').c_str());
+            print_cartridge_info(cart);
+        }
+    }
+    return failures == 0 ? 0 : 1;
+}
+
 void print_usage(const char *prog)
 {
     std::printf(
@@ -248,6 +393,8 @@ void print_usage(const char *prog)
         "Usage: %s [options]\n"
         "\n"
         "Options:\n"
+        "  --info <rom>...        print the cartridge header of each ROM\n"
+        "  --list <rom>...        print one summary line per ROM\n"
         "  --selftest [file.ppm]  check the graphics pipeline without a window\n"
         "  --scale N              window magnification factor (default: 4)\n"
         "  --version              print version and exit\n"
@@ -275,6 +422,12 @@ int main(int argc, char *argv[])
         if (arg == "--selftest") {
             const char *ppm = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : nullptr;
             return run_selftest(ppm);
+        }
+        if (arg == "--info") {
+            return run_cartridge_report(argv, i + 1, argc, /*compact=*/false);
+        }
+        if (arg == "--list") {
+            return run_cartridge_report(argv, i + 1, argc, /*compact=*/true);
         }
         if (arg == "--scale") {
             if (i + 1 >= argc) {
