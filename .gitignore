@@ -1,0 +1,25 @@
+# --- Artefacts de compilation ---------------------------------------------
+build/
+cmake-build-*/
+compile_commands.json
+
+# --- ROMs de developpement -------------------------------------------------
+# Le sujet (p.6 et p.11) interdit toute ROM commerciale dans le depot.
+# Les ROMs utilisees pour le developpement (Blargg, jeux personnels) vivent
+# ici et ne doivent JAMAIS etre committees.
+# Le bundle MIT officiel, lui, est versionne dans roms/.
+roms-dev/
+
+# --- Donnees produites a l'execution --------------------------------------
+*.sav        # RAM de cartouche sauvegardee par pile (section V.5)
+*.rtc        # etat de l'horloge temps reel (bonus MBC3)
+*.state      # save states (bonus)
+*.ppm        # captures du framebuffer
+trace*.log   # logs de trace du CPU
+
+# --- Divers ----------------------------------------------------------------
+.cache/
+.vscode/
+.idea/
+*.o
+*.swp
