@@ -1,29 +1,28 @@
 # ===========================================================================
-#  SDL2Setup.cmake — decision D1 du plan : strategie hybride
+#  SDL2Setup.cmake — decision D1: hybrid strategy
 # ===========================================================================
 #
-#  Le sujet (Chapitre IV, p.6) exige :
-#     « Your build output must bundle or document its runtime dependencies
-#       so the corrector can run it without manual setup. »
+#  The subject (Chapter IV, p.6) requires:
+#     "Your build output must bundle or document its runtime dependencies
+#      so the corrector can run it without manual setup."
 #
-#  Dire « installez libsdl2-dev » dans le README, c'est du setup manuel :
-#  l'exigence ne serait pas tenue. On procede donc en deux temps :
+#  Writing "install libsdl2-dev" in the README IS manual setup, so that alone
+#  would not satisfy the requirement. We therefore proceed in two stages:
 #
-#     1. SDL2 present sur le systeme  -> on l'utilise (build rapide).
-#     2. SDL2 absent                  -> CMake telecharge les sources et
-#                                        compile SDL2 en STATIQUE. L'executable
-#                                        embarque alors SDL2 : aucune
-#                                        installation n'est requise.
+#     1. SDL2 present on the system -> use it (fast build).
+#     2. SDL2 missing               -> CMake downloads the sources and builds
+#                                      SDL2 STATICALLY. The executable then
+#                                      embeds SDL2 and needs no installation.
 #
-#  Dans les deux cas, ce fichier definit une cible unique : RetroEmu::SDL2.
-#  Le reste du projet ne sait pas laquelle des deux voies a ete empruntee.
+#  Either way this file defines a single target: RetroEmu::SDL2.
+#  The rest of the project never knows which path was taken.
 # ===========================================================================
 
 option(RETROEMU_FORCE_FETCH_SDL2
-       "Ignorer le SDL2 du systeme et toujours compiler SDL2 depuis les sources" OFF)
+       "Ignore any system SDL2 and always build SDL2 from source" OFF)
 
 set(RETROEMU_SDL2_TAG "release-2.32.10" CACHE STRING
-    "Tag SDL2 utilise quand SDL2 doit etre compile depuis les sources")
+    "SDL2 tag used when SDL2 has to be built from source")
 
 if(NOT TARGET RetroEmu::SDL2)
 
@@ -35,37 +34,38 @@ if(NOT TARGET RetroEmu::SDL2)
     endif()
 
     if(SDL2_FOUND)
-        # ---- Voie 1 : SDL2 du systeme ------------------------------------
-        message(STATUS "SDL2 : trouve sur le systeme (version ${SDL2_VERSION})")
+        # ---- Path 1: system SDL2 -----------------------------------------
+        message(STATUS "SDL2: found on the system (version ${SDL2_VERSION})")
 
         if(TARGET SDL2::SDL2)
-            # CMake moderne : la cible porte deja ses includes et ses flags.
+            # Modern CMake package: the target already carries its include
+            # directories and compile flags.
             target_link_libraries(retroemu_sdl2 INTERFACE SDL2::SDL2)
             if(TARGET SDL2::SDL2main)
                 target_link_libraries(retroemu_sdl2 INTERFACE SDL2::SDL2main)
             endif()
         else()
-            # Anciens paquets SDL2 : seules les variables sont fournies.
+            # Older SDL2 packages only export variables.
             target_include_directories(retroemu_sdl2 INTERFACE ${SDL2_INCLUDE_DIRS})
             target_link_libraries(retroemu_sdl2 INTERFACE ${SDL2_LIBRARIES})
         endif()
 
-        set(RETROEMU_SDL2_ORIGINE "systeme" CACHE INTERNAL "")
+        set(RETROEMU_SDL2_ORIGIN "system" CACHE INTERNAL "")
 
     else()
-        # ---- Voie 2 : compilation depuis les sources ----------------------
-        message(STATUS "SDL2 : absent du systeme -> telechargement et compilation statique")
-        message(STATUS "       (premiere compilation plus longue, ensuite mis en cache)")
+        # ---- Path 2: build from source ------------------------------------
+        message(STATUS "SDL2: not found on the system -> fetching and building statically")
+        message(STATUS "      (first build takes longer, afterwards it is cached)")
 
         include(FetchContent)
 
-        # SDL_STATIC seul : l'executable final embarque SDL2 et ne depend
-        # d'aucun libSDL2.so a l'execution.
-        set(SDL_SHARED           OFF CACHE BOOL "" FORCE)
-        set(SDL_STATIC           ON  CACHE BOOL "" FORCE)
-        set(SDL_TEST             OFF CACHE BOOL "" FORCE)
-        set(SDL2_DISABLE_INSTALL ON  CACHE BOOL "" FORCE)
-        set(SDL2_DISABLE_UNINSTALL ON CACHE BOOL "" FORCE)
+        # SDL_STATIC only: the final executable embeds SDL2 and depends on no
+        # libSDL2.so at run time.
+        set(SDL_SHARED             OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC             ON  CACHE BOOL "" FORCE)
+        set(SDL_TEST               OFF CACHE BOOL "" FORCE)
+        set(SDL2_DISABLE_INSTALL   ON  CACHE BOOL "" FORCE)
+        set(SDL2_DISABLE_UNINSTALL ON  CACHE BOOL "" FORCE)
 
         FetchContent_Declare(SDL2
             GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
@@ -80,7 +80,7 @@ if(NOT TARGET RetroEmu::SDL2)
             target_link_libraries(retroemu_sdl2 INTERFACE SDL2::SDL2main)
         endif()
 
-        set(RETROEMU_SDL2_ORIGINE "sources (statique)" CACHE INTERNAL "")
+        set(RETROEMU_SDL2_ORIGIN "built from source (static)" CACHE INTERNAL "")
     endif()
 
 endif()

@@ -1,175 +1,176 @@
-# Journal des decisions techniques — RetroEmu
+# Technical decision log — RetroEmu
 
-Ce fichier existe pour la soutenance. Chaque fois qu'une ambiguite du sujet
-est tranchee, la decision est consignee ici avec ses alternatives, afin de
-pouvoir la justifier devant un correcteur.
+This file exists for the defence. Whenever an ambiguity in the subject has to
+be resolved, the decision is recorded here together with the alternatives that
+were considered, so that it can be justified in front of a corrector.
 
-Reference : sujet **RetroEmu**, version 9.1, 12 pages.
+Reference: subject **RetroEmu**, version 9.1, 12 pages.
 
 ---
 
-## Ambiguites relevees dans le sujet
+## Ambiguities found in the subject
 
-Le sujet ne precise pas les points suivants. Chacun a du etre tranche.
+The subject does not specify the following points. Each one had to be decided.
 
-| # | Point non specifie | Ou |
+| # | Unspecified point | Where |
 |---|---|---|
-| A1 | « Running thread » : un vrai thread est-il exige, ou seulement une GUI non degradee ? | V.3, p.7 |
-| A2 | Les bibliotheques hors couche de rendu sont-elles libres ? (cas de Dear ImGui) | Ch. IV, p.6 |
-| A3 | L'etat post-boot des registres releve-t-il de l'obligatoire ou du bonus ? | V.1 p.7 / Ch. VI p.9 |
-| A4 | Quelle precision temporelle est exigee ? Aucun chiffre n'est donne. | V.3, p.7 |
-| A5 | Des arguments en ligne de commande sont-ils autorises en plus de la GUI ? | Ch. IV, p.6 |
-| A6 | Quelles erreurs faut-il gerer ? Aucune exigence ecrite. | — |
-| A7 | Ou doit vivre le debugger (terminal, fenetre, overlay) ? | V.1, p.7 |
+| A1 | "Running thread": is a real thread required, or only a non-degraded GUI? | V.3, p.7 |
+| A2 | Are libraries outside the rendering layer free to use? (the Dear ImGui case) | Ch. IV, p.6 |
+| A3 | Does the post-boot register state belong to the mandatory part or to the bonus? | V.1 p.7 / Ch. VI p.9 |
+| A4 | What timing accuracy is required? No figure is given. | V.3, p.7 |
+| A5 | Are command-line arguments allowed in addition to the GUI? | Ch. IV, p.6 |
+| A6 | Which errors must be handled? No requirement is written. | — |
+| A7 | Where should the debugger live (terminal, window, overlay)? | V.1, p.7 |
 
 ---
 
-## D1 — SDL2 : strategie de build hybride
+## D1 — SDL2: hybrid build strategy
 
-**Contexte.** Le sujet (Ch. IV, p.6) exige que le build « embarque ou documente
-ses dependances runtime pour que le correcteur puisse lancer sans setup manuel ».
+**Context.** The subject (Ch. IV, p.6) requires the build to "bundle or
+document its runtime dependencies so the corrector can run it without manual
+setup".
 
 **Alternatives.**
-1. `find_package(SDL2 REQUIRED)` + README « installez libsdl2-dev » — echoue si
-   le correcteur n'a pas SDL2 : c'est precisement du setup manuel.
-2. `FetchContent` systematique — fonctionne partout, mais recompile SDL2 meme
-   quand le systeme le fournit deja.
-3. **Hybride** : `find_package` d'abord, repli automatique sur `FetchContent`
-   avec compilation statique.
+1. `find_package(SDL2 REQUIRED)` + a README saying "install libsdl2-dev" —
+   fails if the corrector has no SDL2, which is exactly manual setup.
+2. Always use `FetchContent` — works everywhere, but rebuilds SDL2 even when
+   the system already provides it.
+3. **Hybrid**: `find_package` first, automatic fallback to `FetchContent` with
+   a static build.
 
-**Decision : option 3.** Voir `cmake/SDL2Setup.cmake`.
-En voie de repli, SDL2 est lie **statiquement** : l'executable produit ne
-depend d'aucun `libSDL2.so`, ce qui satisfait litteralement le verbe
-« bundle » du sujet.
+**Decision: option 3.** See `cmake/SDL2Setup.cmake`.
+On the fallback path SDL2 is linked **statically**: the resulting executable
+depends on no `libSDL2.so`, which satisfies the subject's verb "bundle"
+literally.
 
-**Verifie le 2026-09-16** sur un conteneur sans SDL2 installe.
-
----
-
-## D2 — Les ROMs de test sont versionnees
-
-**Contexte.** Le sujet (p.6, p.11) interdit les ROMs **commerciales** dans le
-depot. Il demande (p.11) d'extraire `attachments/test-roms.zip` « a cote de
-l'executable ».
-
-**Decision.** Le bundle est commite dans `roms/`, fichiers `LICENSE` inclus
-(les 9 ROMs sont sous licence MIT : Matt Currie pour acid2, Joonas Javanainen
-pour mooneye). Le correcteur n'a donc rien a telecharger.
-Les ROMs de developpement (Blargg, jeux personnels) vivent dans `roms-dev/`,
-qui est gitignore.
+**Verified on 2026-09-16** on a container with no SDL2 installed: fresh clone,
+single command, working executable, zero external SDL dependency.
 
 ---
 
-## D3 — Propriete de la memoire : le Bus possede tout
+## D2 — Test ROMs are versioned
 
-**Alternatives.** Memoire globale ; pointeurs croises entre composants ;
-un proprietaire unique.
+**Context.** The subject (p.6, p.11) forbids **commercial** ROMs in the
+repository. It asks (p.11) that `attachments/test-roms.zip` be extracted
+"next to your executable".
 
-**Decision.** `Bus` possede la cartouche, le PPU, le timer, le joypad, le DMA,
-la WRAM et la HRAM. Le `Cpu` ne possede rien et recoit `Bus&` en parametre :
-`u32 Cpu::step(Bus& bus);`
-Pas de reference circulaire, chaque composant testable isolement.
-
----
-
-## D4 — Le debugger vit dans le terminal
-
-**Contexte (A2, A7).** Dear ImGui donnerait un plus bel affichage, mais le
-sujet interdit « tout framework de plus haut niveau pour la couche de rendu »
-(p.6) sans dire si ImGui en fait partie. Zone grise.
-
-**Decision.** Debugger en terminal. Aucun risque en soutenance, testable par
-script, et immediatement disponible. Un overlay dessine directement en SDL2
-pourra etre ajoute a l'etape 15 si le temps le permet.
+**Decision.** The bundle is committed under `roms/`, `LICENSE` files included
+(the 9 ROMs are MIT-licensed: Matt Currie for acid2, Joonas Javanainen for
+mooneye). The corrector therefore has nothing to download.
+Development ROMs (Blargg, personally owned dumps) live in `roms-dev/`, which
+is gitignored.
 
 ---
 
-## D5 — Rendu du PPU a la scanline
+## D3 — Memory ownership: the Bus owns everything
 
-**Alternatives.** Par frame (trop imprecis, echoue dmg-acid2) ; **par
-scanline** ; par pixel avec FIFO materielle (exact, mais tres couteux).
+**Alternatives.** Global memory; cross pointers between components; a single
+owner.
 
-**Decision.** Rendu par scanline, compose a la fin du mode 3.
-Suffisant pour les deux ROMs acid2 du bundle. La FIFO n'est necessaire que
-pour des effets mid-scanline qu'aucune ROM du bundle ne teste.
-
----
-
-## D6 — Cadencage par horloge, pas par VSync
-
-**Decision.** Pas de `SDL_RENDERER_PRESENTVSYNC`. Le VSync verrouillerait
-l'emulation sur le taux de rafraichissement de l'ecran du correcteur (60 Hz),
-alors que le materiel tourne a 59,727 Hz. Le rythme sera pilote par une
-horloge haute resolution (etape 11).
+**Decision.** `Bus` owns the cartridge, the PPU, the timer, the joypad, the
+DMA engine, WRAM and HRAM. `Cpu` owns nothing and receives `Bus&` as a
+parameter: `u32 Cpu::step(Bus& bus);`
+No circular references, and every component stays testable in isolation.
 
 ---
 
-## D7 — Boucle mono-thread
+## D4 — The debugger lives in the terminal
 
-**Contexte (A1).** Le titre de la section V.3 dit « Running thread », mais le
-corps du texte n'exige que « vitesse normale sans affecter negativement les
-operations de la GUI » (p.7).
+**Context (A2, A7).** Dear ImGui would look nicer, but the subject forbids
+"any higher-level framework for the rendering layer" (p.6) without saying
+whether ImGui counts as one. Grey area.
 
-**Decision.** Boucle mono-thread : emuler une frame, puis traiter les
-evenements, puis afficher, puis attendre. L'exigence ecrite est satisfaite.
-SDL2 impose de toute facon de pomper les evenements sur le thread proprietaire
-de la fenetre, ce qui rend le multithreading plus risque qu'utile ici.
-
-**A defendre en soutenance** si un correcteur lit le titre de section de
-maniere litterale.
+**Decision.** Terminal debugger. No risk at the defence, scriptable, and
+available immediately. An overlay drawn directly with SDL2 may be added in
+step 15 if time allows.
 
 ---
 
-## D8 — Timing au M-cycle, par « tick-on-access » ⚫
+## D5 — PPU renders per scanline
 
-**La decision la plus structurante du projet.**
+**Alternatives.** Per frame (too coarse, fails dmg-acid2); **per scanline**;
+per pixel with a hardware-accurate FIFO (exact, but very expensive).
 
-**Contexte (A4).** Le sujet ne chiffre aucune precision temporelle. Mais le
-bundle de ROMs impose de fait le niveau requis : il contient
-`mooneye/acceptance/div_timing.gb`, `intr_timing.gb` et `oam_dma/basic.gb`,
-qui verifient a quel cycle exact, **a l'interieur d'une instruction**, le
-registre DIV s'incremente et le drapeau IF est echantillonne.
+**Decision.** Scanline rendering, composed at the end of mode 3.
+Sufficient for both acid2 ROMs in the bundle. The FIFO is only needed for
+mid-scanline effects that no ROM in the bundle exercises.
+
+---
+
+## D6 — Pacing by clock, not by VSync
+
+**Decision.** No `SDL_RENDERER_PRESENTVSYNC`. VSync would lock emulation to
+the corrector's monitor refresh rate (60 Hz) while the hardware runs at
+59.727 Hz. Pacing will be driven by a high-resolution clock (step 11).
+
+---
+
+## D7 — Single-threaded loop
+
+**Context (A1).** The title of section V.3 reads "Running thread", but the
+body only requires "normal speed without adversely affecting the operations of
+the GUI" (p.7).
+
+**Decision.** Single-threaded loop: emulate one frame, pump events, present,
+wait. The written requirement is met. SDL2 requires events to be pumped on the
+thread that owns the window anyway, which makes multithreading more of a risk
+than a benefit here.
+
+**To defend at the review** if a corrector reads the section title literally.
+
+---
+
+## D8 — M-cycle timing through "tick-on-access"
+
+**The most structural decision of the project.**
+
+**Context (A4).** The subject gives no timing accuracy figure. The test bundle
+sets the bar instead: it contains
+`mooneye/acceptance/div_timing.gb`, `intr_timing.gb` and `oam_dma/basic.gb`,
+which check on exactly which cycle, **inside an instruction**, the DIV
+register increments and the IF flag is sampled.
 
 **Alternatives.**
-1. Rattrapage en fin d'instruction (`n = cpu.step(); ppu.tick(n);`) — simple,
-   mais ne peut pas passer ces trois ROMs.
-2. **Tick-on-access** : chaque acces memoire fait avancer l'horloge de 4
-   cycles au moment ou il a lieu.
-3. FIFO au T-cycle — exact, hors de proportion pour le bundle.
+1. Catch-up at the end of each instruction (`n = cpu.step(); ppu.tick(n);`) —
+   simple, but cannot pass those three ROMs.
+2. **Tick-on-access**: every memory access advances the clock by 4 cycles at
+   the moment it happens.
+3. T-cycle FIFO — exact, but out of proportion for this bundle.
 
-**Decision : option 2.**
+**Decision: option 2.**
 ```cpp
 u8 Bus::read(u16 addr) { tick(4); return dispatch(addr); }
 ```
-Corollaire : le temps est compte dans deux unites distinctes des le depart,
-`t_cpu` et `t_sys`, car en mode double vitesse CGB (section V.6, p.8) le CPU
-tourne deux fois plus vite mais **pas** le PPU.
+Corollary: time is counted in two distinct units from the start, `t_cpu` and
+`t_sys`, because in CGB double-speed mode (section V.6, p.8) the CPU runs
+twice as fast but the PPU does **not**.
 
-Poser cette separation au depart coute trois lignes ; la rajouter apres coup
-imposerait de reecrire le CPU, le PPU, le timer et le DMA.
-
----
-
-## D9 — Arguments en ligne de commande en plus de la GUI
-
-**Contexte (A5).** Le sujet exige une GUI avec « load, play, pause » (p.6) et
-ne dit rien d'une interface en ligne de commande.
-
-**Decision.** La GUI reste le moyen de chargement exige. Un argument optionnel
-`./retroemu [rom]` est accepte en plus : il n'enleve rien a l'exigence et
-accelere enormement le cycle de test pendant le developpement.
-
-Un mode `--selftest` sans fenetre est egalement fourni, pour pouvoir valider
-la chaine graphique en SSH ou en conteneur.
+Putting that separation in place now costs three lines; retrofitting it later
+would mean rewriting the CPU, the PPU, the timer and the DMA engine.
 
 ---
 
-## D10 — Langue du code
+## D9 — Command-line arguments in addition to the GUI
 
-**Contexte.** Le sujet est explicite : « **No coding style is enforced.** You
+**Context (A5).** The subject requires a GUI with "load, play, pause" (p.6)
+and says nothing about a command-line interface.
+
+**Decision.** The GUI remains the required loading mechanism. An optional
+`./retroemu [rom]` argument is accepted on top of it: it takes nothing away
+from the requirement and greatly speeds up the development loop.
+
+A windowless `--selftest` mode is also provided so the graphics pipeline can
+be validated over SSH or inside a container.
+
+---
+
+## D10 — Language of the code and of the output
+
+**Context.** The subject is explicit: "**No coding style is enforced.** You
 may follow any convention you like as long as your code remains readable to
-your peer evaluators. » (p.6). Aucune contrainte de langue n'existe.
+your peer evaluators." (p.6). No language constraint exists.
 
-**Decision.** Identifiants en anglais (ils reprennent la terminologie du
-materiel : `LCDC`, `SCX`, `OAM`), commentaires en francais (les correcteurs
-sont francophones, et le code doit pouvoir etre defendu).
+**Decision.** Everything in English: identifiers, comments, program output,
+README and documentation. Identifiers already follow hardware terminology
+(`LCDC`, `SCX`, `OAM`), so a single language throughout keeps the codebase
+consistent and readable by any evaluator.

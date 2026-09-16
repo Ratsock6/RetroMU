@@ -1,127 +1,127 @@
 # RetroEmu
 
-Emulateur de console portable 8 bits — modele **DMG** (1989) et son successeur
-couleur **CGB** (1998).
+An emulator for an 8-bit handheld console — the **DMG** model (1989) and its
+colour successor, the **CGB** (1998).
 
-Projet 42 — sujet *RetroEmu*, version 9.1.
+42 School project — subject *RetroEmu*, version 9.1.
 
 ---
 
-## Compilation
+## Building
 
-**Une seule commande**, comme exige par le sujet (Chapitre IV, p.6) :
+**A single command**, as required by the subject (Chapter IV, p.6):
 
 ```bash
 cmake -B build && cmake --build build -j
 ```
 
-L'executable est alors `./build/retroemu`.
+The executable is then `./build/retroemu`.
 
-### Dependances
+### Dependencies
 
-La seule dependance est **SDL2**, imposee par le sujet pour les couches
-graphique, entrees et audio (p.6).
+The only dependency is **SDL2**, imposed by the subject for the graphics,
+input and audio layers (p.6).
 
-**Aucune installation manuelle n'est requise.** Le build detecte SDL2 :
+**No manual installation is required.** The build detects SDL2:
 
-- s'il est present sur le systeme, il est utilise tel quel (build rapide) ;
-- sinon, CMake telecharge SDL2 et le compile **en statique**. L'executable
-  produit embarque alors SDL2 et ne depend d'aucun `libSDL2.so`.
+- if it is present on the system, it is used as is (fast build);
+- otherwise CMake downloads SDL2 and builds it **statically**. The resulting
+  executable embeds SDL2 and depends on no `libSDL2.so`.
 
-La premiere compilation dure quelques minutes dans le second cas ; les
-suivantes sont mises en cache.
+In the second case the first build takes a few minutes; later builds are
+cached.
 
-Prerequis reels : un compilateur C++17 (GCC 7+ ou Clang 6+), CMake 3.16+, et
-`git` si SDL2 doit etre telecharge.
+Actual prerequisites: a C++17 compiler (GCC 7+ or Clang 6+), CMake 3.16+, and
+`git` if SDL2 has to be downloaded.
 
-### Options de build
+### Build options
 
-| Option | Defaut | Effet |
+| Option | Default | Effect |
 |---|---|---|
-| `-DCMAKE_BUILD_TYPE=Debug` | `Release` | Build de debogage (non optimise) |
-| `-DRETROEMU_SANITIZE=ON` | `OFF` | Active AddressSanitizer et UBSan |
-| `-DRETROEMU_FORCE_FETCH_SDL2=ON` | `OFF` | Ignore le SDL2 du systeme et le recompile |
-| `-DRETROEMU_WARNINGS=OFF` | `ON` | Desactive les avertissements stricts |
+| `-DCMAKE_BUILD_TYPE=Debug` | `Release` | Unoptimised debug build |
+| `-DRETROEMU_SANITIZE=ON` | `OFF` | Enable AddressSanitizer and UBSan |
+| `-DRETROEMU_FORCE_FETCH_SDL2=ON` | `OFF` | Ignore system SDL2 and rebuild it |
+| `-DRETROEMU_WARNINGS=OFF` | `ON` | Disable strict warnings |
 
 ---
 
-## Utilisation
+## Usage
 
 ```bash
-./build/retroemu                      # ouvre la fenetre
-./build/retroemu --scale 6            # fenetre agrandie x6
-./build/retroemu --selftest           # verifie la chaine graphique, sans fenetre
-./build/retroemu --selftest out.ppm   # ... et sauvegarde l'image produite
+./build/retroemu                      # open the window
+./build/retroemu --scale 6            # window magnified x6
+./build/retroemu --selftest           # check the graphics pipeline, no window
+./build/retroemu --selftest out.ppm   # ... and save the produced image
 ./build/retroemu --help
 ```
 
-Le mode `--selftest` n'ouvre aucune fenetre : il permet de valider le build en
-SSH, en conteneur, ou partout ou il n'y a pas de serveur graphique.
+`--selftest` opens no window, so the build can be validated over SSH, inside a
+container, or anywhere without a display server.
 
 ---
 
-## Etat d'avancement
+## Progress
 
-Le projet est developpe par etapes, chacune validee par une ROM du bundle de
-test avant de passer a la suivante.
+The project is developed step by step, each step validated against a ROM from
+the test bundle before moving on.
 
-| # | Etape | Etat |
+| # | Step | State |
 |---|---|---|
-| 0 | Mise a niveau hexadecimal / bit a bit | ✅ |
-| 1 | Squelette CMake + SDL2 + fenetre 160x144 | ✅ |
-| 2 | Cartouche : chargement ROM et parsing de l'en-tete | ⏳ |
-| 3 | Bus / MMU avec tick-on-access | ⏳ |
-| 4 | CPU : registres, flags, jeu d'instructions | ⏳ |
-| 5 | Desassembleur et debugger *(sujet V.1)* | ⏳ |
-| 6 | Log de trace et validation differentielle | ⏳ |
-| 7 | Interruptions et timer | ⏳ |
-| 8 | PPU : machine a etats | ⏳ |
-| 9 | PPU : background, window, sprites, palettes *(sujet V.2)* | ⏳ |
-| 10 | DMA vers l'OAM | ⏳ |
-| 11 | Boucle temps reel et entrees *(sujet V.3, V.4)* | ⏳ |
-| 12 | GUI : load / play / pause *(sujet Ch. IV)* | ⏳ |
-| 13 | MBC1, MBC2, MBC5 et sauvegarde par pile *(sujet V.5)* | ⏳ |
-| 14 | CGB : palettes, banque VRAM, HDMA, double vitesse *(sujet V.6)* | ⏳ |
-| 15 | Robustesse et finalisation | ⏳ |
+| 0 | Hexadecimal / bitwise warm-up | done |
+| 1 | CMake skeleton + SDL2 + 160x144 window | done |
+| 2 | Cartridge: ROM loading and header parsing | todo |
+| 3 | Bus / MMU with tick-on-access | todo |
+| 4 | CPU: registers, flags, instruction set | todo |
+| 5 | Disassembler and debugger *(subject V.1)* | todo |
+| 6 | Trace log and differential validation | todo |
+| 7 | Interrupts and timer | todo |
+| 8 | PPU: state machine | todo |
+| 9 | PPU: background, window, sprites, palettes *(subject V.2)* | todo |
+| 10 | OAM DMA | todo |
+| 11 | Real-time loop and inputs *(subject V.3, V.4)* | todo |
+| 12 | GUI: load / play / pause *(subject Chapter IV)* | todo |
+| 13 | MBC1, MBC2, MBC5 and battery saves *(subject V.5)* | todo |
+| 14 | CGB: palettes, VRAM bank, HDMA, double speed *(subject V.6)* | todo |
+| 15 | Robustness and finalisation | todo |
 
 ---
 
-## Organisation du depot
+## Repository layout
 
 ```
 RetroEmu/
-├── CMakeLists.txt          build principal
-├── cmake/SDL2Setup.cmake   detection SDL2 avec repli automatique
-├── include/retroemu/       en-tetes
-│   ├── core/               CPU, bus, PPU, timer, cartouche...
-│   ├── debug/              desassembleur, tracer, debugger
-│   └── front/              SDL2, interface
+├── CMakeLists.txt          main build file
+├── cmake/SDL2Setup.cmake   SDL2 detection with automatic fallback
+├── include/retroemu/       headers
+│   ├── core/               CPU, bus, PPU, timer, cartridge...
+│   ├── debug/              disassembler, tracer, debugger
+│   └── front/              SDL2, user interface
 ├── src/                    implementations
-├── roms/                   bundle de test MIT (versionne)
-├── roms-dev/               ROMs de developpement (gitignore)
-├── tests/                  tests unitaires et scripts
+├── roms/                   MIT test bundle (versioned)
+├── roms-dev/               development ROMs (gitignored)
+├── tests/                  unit tests and scripts
 └── docs/
-    ├── decisions.md        journal des decisions techniques
-    └── etape0/bitwise.cpp  terrain d'entrainement hexa / bit a bit
+    ├── decisions.md        technical decision log
+    └── step0/bitwise.cpp   hexadecimal / bitwise training ground
 ```
 
 ---
 
 ## ROMs
 
-`roms/` contient le bundle de test fourni avec le sujet : 9 ROMs sous licence
-MIT (acid2 de Matt Currie, mooneye de Joonas Javanainen). Voir
-`roms/README.md` pour le detail de ce que chacune valide.
+`roms/` holds the test bundle shipped with the subject: 9 MIT-licensed ROMs
+(acid2 by Matt Currie, mooneye by Joonas Javanainen). See `roms/README.md` for
+what each of them validates.
 
-**Aucune ROM commerciale ne se trouve dans ce depot**, conformement au sujet
-(p.6 et p.11).
+**No commercial ROM is present in this repository**, per the subject (p.6 and
+p.11).
 
 ---
 
-## Documentation technique
+## Hardware documentation
 
-Le materiel emule est documente par la communaute homebrew, a laquelle le
-sujet renvoie explicitement (p.4) : **Pan Docs** et le **GBDev wiki**.
+The emulated hardware is documented by the homebrew community, which the
+subject explicitly points to (p.4): **Pan Docs** and the **GBDev wiki**.
 
-Les choix techniques du projet, ainsi que les points laisses ambigus par le
-sujet, sont consignes dans [`docs/decisions.md`](docs/decisions.md).
+The project's technical choices, along with the points the subject leaves
+ambiguous, are recorded in [`docs/decisions.md`](docs/decisions.md).

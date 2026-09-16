@@ -1,39 +1,41 @@
-# ROMs de test
+# Test ROMs
 
-Bundle officiel fourni avec le sujet (`attachments/test-roms.zip`), extrait ici
-et versionne. Le sujet (Chapitre VII, p.11) indique que c'est **le materiel de
-test canonique utilise pendant l'evaluation** et le seul qui sera evalue.
+Official bundle shipped with the subject (`attachments/test-roms.zip`),
+extracted here and versioned. The subject (Chapter VII, p.11) states that this
+is **the canonical test material used during evaluation** and the only ROM
+material that will be evaluated.
 
-Les 9 ROMs sont sous **licence MIT** : leur presence dans le depot est
-legitime. Voir `acid2/LICENSE` (Matt Currie) et `mooneye/LICENSE`
+All 9 ROMs are **MIT-licensed**, so keeping them in the repository is
+legitimate. See `acid2/LICENSE` (Matt Currie) and `mooneye/LICENSE`
 (Joonas Javanainen).
 
-> Le sujet interdit toute ROM **commerciale** dans le depot (p.6 et p.11).
-> Les ROMs de developpement (Blargg, jeux personnels) vont dans `roms-dev/`,
-> qui est gitignore.
+> The subject forbids any **commercial** ROM in the repository (p.6 and p.11).
+> Development ROMs (Blargg, personally owned dumps) belong in `roms-dev/`,
+> which is gitignored.
 
-## Ce que chaque ROM valide
+## What each ROM validates
 
-| ROM | En-tete | Etape du plan | Ce qui est teste |
+| ROM | Header | Plan step | What is tested |
 |---|---|---|---|
-| `mooneye/acceptance/div_timing.gb` | ROM ONLY, 32 Kio | 7 | Timing du registre DIV |
-| `mooneye/acceptance/intr_timing.gb` | ROM ONLY, 32 Kio | 7 | Timing du service d'interruption |
-| `mooneye/acceptance/oam_dma/basic.gb` | ROM ONLY, 32 Kio | 10 | Bases du DMA vers l'OAM |
-| `acid2/dmg-acid2.gb` | ROM ONLY, 32 Kio | 9 | PPU DMG : background, window, sprites, priorites |
-| `mooneye/mbc1/rom_512kb.gb` | MBC1, 64 Kio | 13 | Commutation de banques ROM (4 banques) |
-| `mooneye/mbc1/ram_64kb.gb` | MBC1+RAM+BATTERY, 8 Kio RAM | 13 | RAM MBC1 + sauvegarde par pile |
-| `mooneye/mbc2/ram.gb` | MBC2+BATTERY, 32 Kio | 13 | RAM 4 bits integree |
-| `mooneye/mbc5/rom_2Mb.gb` | MBC5, 256 Kio | 13 | Commutation de banques ROM (16 banques) |
-| `acid2/cgb-acid2.gbc` | ROM ONLY, **CGB ONLY** | 14 | PPU CGB : palettes, attributs, banque VRAM 1 |
+| `mooneye/acceptance/div_timing.gb` | ROM ONLY, 32 KiB | 7 | DIV register timing |
+| `mooneye/acceptance/intr_timing.gb` | ROM ONLY, 32 KiB | 7 | Interrupt service timing |
+| `mooneye/acceptance/oam_dma/basic.gb` | ROM ONLY, 32 KiB | 10 | OAM DMA basics |
+| `acid2/dmg-acid2.gb` | ROM ONLY, 32 KiB | 9 | DMG PPU: background, window, sprites, priorities |
+| `mooneye/mbc1/rom_512kb.gb` | MBC1, 64 KiB | 13 | ROM bank switching (4 banks) |
+| `mooneye/mbc1/ram_64kb.gb` | MBC1+RAM+BATTERY, 8 KiB RAM | 13 | MBC1 RAM + battery save |
+| `mooneye/mbc2/ram.gb` | MBC2+BATTERY, 32 KiB | 13 | Built-in 4-bit RAM |
+| `mooneye/mbc5/rom_2Mb.gb` | MBC5, 256 KiB | 13 | ROM bank switching (16 banks) |
+| `acid2/cgb-acid2.gbc` | ROM ONLY, **CGB ONLY** | 14 | CGB PPU: palettes, tile attributes, VRAM bank 1 |
 
-**Attention aux noms** : ils sont en **kilobits**, pas en kilo-octets.
-`rom_512kb` = 512 Kbit = **64 Kio**. `rom_2Mb` = 2 Mbit = **256 Kio**.
-`ram_64kb` = 64 Kbit = **8 Kio**.
+**Careful with the file names**: they are in **kilobits**, not kilobytes.
+`rom_512kb` = 512 Kbit = **64 KiB**. `rom_2Mb` = 2 Mbit = **256 KiB**.
+`ram_64kb` = 64 Kbit = **8 KiB**.
 
-## Comment lire les resultats
+## How to read the results
 
-- **Mooneye** affiche `Test OK` ou `TEST FAILED` directement a l'ecran (avec,
-  pour les tests MBC, `BANK NUMBER` / `EXPECTED` / `ACTUAL`). Aucun port serie
-  n'est necessaire.
-- **acid2** dessine un visage. Chaque defaut du visage designe un bug precis du
-  PPU ; l'auteur fournit une image de reference a comparer pixel par pixel.
+- **Mooneye** prints `Test OK` or `TEST FAILED` directly on screen (and, for
+  the MBC tests, `BANK NUMBER` / `EXPECTED` / `ACTUAL`). No serial port is
+  needed.
+- **acid2** draws a face. Every defect in the face points at a specific PPU
+  bug; the author provides a reference image to compare against pixel by
+  pixel.
