@@ -9,6 +9,7 @@
 #include "retroemu/core/cartridge.hpp"
 #include "retroemu/core/cpu.hpp"
 #include "retroemu/core/joypad.hpp"
+#include "retroemu/front/ui.hpp"
 #include "retroemu/debug/disassembler.hpp"
 
 namespace retroemu {
@@ -1239,6 +1240,58 @@ int run_cpu_selftest(bool verbose)
         }
         report(all_one, "RET, RETI, JP HL and RST are one byte long",
                "one of them was reported with the wrong length");
+    }
+
+    // === User interface helpers (subject Ch. IV) ============================
+    //  The path handling behind the cartridge browser. Pure functions, so
+    //  they can be checked without a window.
+    if (verbose) std::printf("\n== user interface ==\n");
+    {
+        check_text("joining a directory and a file",
+                   join_path("roms/acid2", "dmg-acid2.gb"), "roms/acid2/dmg-acid2.gb");
+        check_text("joining onto the root", join_path("/", "tmp"), "/tmp");
+        check_text("'..' walks up", join_path("roms/acid2", ".."), "roms");
+        check_text("the parent of a path", parent_directory("roms/acid2/dmg-acid2.gb"), "roms/acid2");
+        check_text("the parent of the root is the root", parent_directory("/"), "/");
+        check_text("a bare name has no parent directory", parent_directory("rom.gb"), ".");
+        check_text("trailing slashes are ignored", parent_directory("roms/acid2/"), "roms");
+    }
+    {
+        // The browser lists directories first, then cartridges, and leaves
+        // everything else out: it exists to find a cartridge, not to explore.
+        const std::vector<FileEntry> entries = list_directory("roms/acid2");
+        bool has_dmg = false, has_cgb = false, has_licence = false;
+        for (const FileEntry &e : entries) {
+            if (e.name == "dmg-acid2.gb")  has_dmg = true;
+            if (e.name == "cgb-acid2.gbc") has_cgb = true;
+            if (e.name == "LICENSE")       has_licence = true;
+        }
+        report(has_dmg && has_cgb, "the browser lists .gb and .gbc files",
+               "a cartridge was missing from the listing");
+        report(!has_licence, "and leaves everything else out",
+               "a non-cartridge file was listed");
+
+        bool directories_first = true;
+        bool seen_file = false;
+        for (const FileEntry &e : entries) {
+            if (!e.is_directory) seen_file = true;
+            else if (seen_file)  directories_first = false;
+        }
+        report(directories_first, "directories come before cartridges",
+               "the listing was not grouped");
+    }
+    {
+        const std::vector<FileEntry> entries = list_directory("/no/such/place");
+        report(entries.empty(), "an unreadable directory lists nothing",
+               "a missing directory produced entries");
+    }
+    {
+        UiButton button;
+        button.rect = SDL_Rect{10, 20, 100, 30};
+        report(button.contains(10, 20) && button.contains(109, 49),
+               "a button contains its own corners", "hit testing missed a corner");
+        report(!button.contains(9, 20) && !button.contains(110, 49) && !button.contains(10, 50),
+               "and nothing just outside them", "hit testing reached outside the button");
     }
 
     std::printf("\n");

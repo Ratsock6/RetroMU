@@ -92,7 +92,7 @@ the test bundle before moving on.
 | 9 | PPU: background, window, sprites, palettes *(subject V.2)* | done |
 | 10 | OAM DMA | done |
 | 11 | Real-time loop and inputs *(subject V.3, V.4)* | done |
-| 12 | GUI: load / play / pause *(subject Chapter IV)* | todo |
+| 12 | GUI: load / play / pause *(subject Chapter IV)* | done |
 | 13 | MBC1, MBC2, MBC5 and battery saves *(subject V.5)* | todo |
 | 14 | CGB: palettes, VRAM bank, HDMA, double speed *(subject V.6)* | todo |
 | 15 | Robustness and finalisation | todo |
@@ -112,6 +112,7 @@ the test bundle before moving on.
 ./tests/run_render_tests.sh       # step 9: rendering             (9 checks)
 ./tests/run_dma_tests.sh          # step 10: OAM DMA              (5 checks)
 ./tests/run_input_tests.sh        # step 11: loop and inputs      (14 checks)
+./tests/run_gui_tests.sh          # step 12: the interface        (15 checks)
 ```
 
 `run_cartridge_tests.sh` checks the parsed summary of the nine bundled ROMs
@@ -137,6 +138,19 @@ They report their verdict through the link port rather than the screen, which
 is what makes it possible to validate the whole instruction set before any
 rendering exists.
 
+### The interface
+
+Chapter IV of the subject requires a GUI with at least **load**, **play** and
+**pause**. They are buttons on a bar below the screen, clickable with the
+mouse, and each also has a keyboard shortcut.
+
+**Load** opens a cartridge browser: directories and `.gb` / `.gbc` files, no
+other clutter, walkable with the arrow keys or the mouse. The emulator can
+therefore be started with no argument at all and still reach a cartridge.
+Dropping a file onto the window loads it too.
+
+The bar shows which cartridge is running, or says why none is.
+
 ### Controls
 
 | Key | Button |
@@ -146,8 +160,13 @@ rendering exists.
 | `Z` | B |
 | `Enter` | Start |
 | `Backspace` or right `Shift` | Select |
-| `Space` | Pause and resume |
+| `Space` | Play and pause |
+| `O` or `F1` | Load: open the cartridge browser |
+| `R` | Reset |
 | `Escape` | Quit |
+
+In the browser: arrow keys and `Page Up` / `Page Down` move, `Enter` opens a
+directory or loads a cartridge, `Escape` cancels.
 
 The subject names the buttons but not the keys, so this mapping is a choice.
 It lives in one table at the top of `src/front/frontend.cpp`.
@@ -281,7 +300,9 @@ RetroEmu/
 │   └── front/              SDL2, user interface
 ├── src/
 │   ├── main.cpp            entry point and CLI
-│   ├── front/frontend.cpp  window, real-time loop, keyboard (subject V.3, V.4)
+│   ├── front/
+│   │   ├── frontend.cpp    window, real-time loop, keyboard (subject V.3, V.4)
+│   │   └── ui.cpp          on-screen widgets and the browser (subject Ch. IV)
 │   └── core/               emulator core (no SDL here)
 │       ├── cartridge.cpp   ROM loading and header parsing
 │       ├── bus.cpp         address dispatch and the master clock

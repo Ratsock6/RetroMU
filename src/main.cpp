@@ -890,6 +890,8 @@ void print_usage(const char *prog)
         "  --scale N              window magnification factor (default: 4)\n"
         "  --paused               start paused\n"
         "  --frames N             close the window after N frames\n"
+        "  --browser              start with the cartridge browser open\n"
+        "  --ui-keys a,b,c        feed key presses to the window, one per frame\n"
         "  --version              print version and exit\n"
         "  --help                 print this help and exit\n",
         kVersion, prog);
@@ -906,6 +908,8 @@ int main(int argc, char *argv[])
     bool          quiet        = false;
     bool          start_paused = false;
     retroemu::u64 frame_limit  = 0;
+    bool          open_browser = false;
+    std::string   scripted_keys;
     retroemu::u64 max_cycles  = 250000000ULL;   // about 60 emulated seconds
     retroemu::u64 trace_limit = 1000000ULL;
     const char   *trace_file  = nullptr;
@@ -922,7 +926,13 @@ int main(int argc, char *argv[])
         if (arg == "--version") { std::printf("RetroEmu %s\n", kVersion); return 0; }
 
         if (arg == "--cgb")    { force_cgb = true; continue; }
-        if (arg == "--paused") { start_paused = true; continue; }
+        if (arg == "--paused")  { start_paused = true; continue; }
+        if (arg == "--browser") { open_browser = true; continue; }
+        if (arg == "--ui-keys") {
+            if (i + 1 >= argc) { std::fprintf(stderr, "--ui-keys expects a list\n"); return 1; }
+            scripted_keys = argv[++i];
+            continue;
+        }
         if (arg == "--frames") {
             if (i + 1 >= argc) { std::fprintf(stderr, "--frames expects a number\n"); return 1; }
             frame_limit = std::strtoull(argv[++i], nullptr, 10);
@@ -998,6 +1008,9 @@ int main(int argc, char *argv[])
         front.force_cgb    = force_cgb;
         front.start_paused = start_paused;
         front.frame_limit  = frame_limit;
+        front.capture_path = out_path ? out_path : "";
+        front.open_browser  = open_browser;
+        front.scripted_keys = scripted_keys;
         return retroemu::run_frontend(front);
     }
     if (action == "--selftest") return run_selftest(files.empty() ? nullptr : files[0].c_str());

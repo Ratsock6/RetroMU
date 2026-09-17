@@ -752,3 +752,70 @@ human.
 That separation is what lets the whole emulator be tested with no window at
 all: `--screenshot`, `--mooneye`, `--cpucheck` and the debugger all drive the
 same core. The window is one more consumer, not the program.
+
+---
+
+## D46 — The interface is drawn by hand, with SDL2 only
+
+**Context.** Chapter IV of the subject (p.6) requires a GUI with at least
+load, play and pause, and forbids any higher-level framework for the rendering
+layer. Decision D4 already kept Dear ImGui out of the project to stay clear of
+that grey area, at a cost: SDL2 draws rectangles and textures and knows
+nothing about text.
+
+**Decision.** The interface is rectangles and a bitmap font blitted from a
+texture built at startup. A control bar sits BELOW the screen rather than over
+it, so nothing the game draws is ever hidden by the interface.
+
+Deliberately plain. It has to be unmistakable to a corrector, not pretty.
+
+---
+
+## D47 — The font is public domain, and embedded
+
+**Context.** Text needs glyphs, and drawing 95 of them by hand is slow and
+error-prone.
+
+**Decision.** `include/retroemu/front/font.hpp` holds the printable ASCII
+range of Daniel Hepper's font8x8, which is public domain and itself derived
+from the public domain IBM VGA fonts. The provenance and licence are recorded
+in the file's own header.
+
+Note its encoding is the opposite of the console's: here the LEAST significant
+bit of a byte is the LEFTMOST pixel. Mixing the two up would have produced
+mirrored glyphs, which is exactly why the font was rendered and looked at
+before anything was built on top of it.
+
+---
+
+## D48 — Load means a browser, not only a command-line argument
+
+**Context.** A ROM path on the command line is not a GUI. The subject's
+requirement is a failure criterion, so it has to be satisfied inside the
+window.
+
+**Decision.** The Load button opens a browser listing directories and
+`.gb` / `.gbc` files, walkable with the keyboard or the mouse. Everything else
+is filtered out: it exists to find a cartridge, not to explore a disk. The
+emulator can be started with no argument at all and still reach a cartridge.
+
+Drag and drop loads as well, which the subject lists as a UX bonus example
+(Ch. VI, p.9) and which gives a second route to the same one place in the code
+that loads a cartridge, so all three behave identically.
+
+---
+
+## D49 — Key presses can be scripted, so the GUI is testable
+
+**Context.** An interface nobody can test is an interface that quietly breaks.
+The rest of the project is covered by scripts; the GUI was about to be the
+exception.
+
+**Decision.** `--ui-keys up,down,return` pushes key presses into the event
+queue, one per frame, and `--out` writes the whole window, interface included,
+to a PPM. With SDL's dummy video driver both work with no display attached.
+
+That is what lets the test suite prove the subject's requirement rather than
+assert it: it walks the browser into a directory, back out, onto a cartridge,
+and checks the cartridge was loaded. Fifteen checks drive the interface
+exactly as a human would.

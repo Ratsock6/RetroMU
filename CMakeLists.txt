@@ -47,6 +47,7 @@ include(SDL2Setup)
 add_executable(retroemu
     src/main.cpp
     src/front/frontend.cpp
+    src/front/ui.cpp
     src/core/cartridge.cpp
     src/core/bus.cpp
     src/core/cpu.cpp
