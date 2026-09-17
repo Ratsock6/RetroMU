@@ -29,13 +29,17 @@ namespace {
 class Bench {
 public:
     Bench() : bus_(new Bus), cpu_(new Cpu) {}
-    // `code` is placed at the entry point, 0x0100.
-    bool load(const std::vector<u8> &code)
+    // `code` is placed at the entry point, 0x0100. Passing Model::Cgb also
+    // marks the header as a colour cartridge, because a CGB running a
+    // black-and-white cartridge deliberately renders like a DMG (D58).
+    bool load(const std::vector<u8> &code, Model model = Model::Dmg,
+              bool colour_cartridge = true)
     {
         std::vector<u8> rom(32 * 1024, 0x00);
         for (std::size_t i = 0; i < code.size(); ++i) rom[0x0100 + i] = code[i];
 
         // A minimal valid header: ROM only, 32 KiB, no RAM, correct checksum.
+        if (model == Model::Cgb && colour_cartridge) rom[0x0143] = 0xC0;   // CGB only
         rom[0x0147] = 0x00;
         rom[0x0148] = 0x00;
         rom[0x0149] = 0x00;
@@ -47,8 +51,8 @@ public:
         std::string error;
         if (!cart.load_from_memory(std::move(rom), "<selftest>", error)) return false;
 
-        bus_->attach(std::move(cart), Model::Dmg);
-        cpu_->reset(Model::Dmg);
+        bus_->attach(std::move(cart), model);
+        cpu_->reset(model);
         return true;
     }
 
@@ -1186,6 +1190,409 @@ int run_cpu_selftest(bool verbose)
             report(pixel(b, 2, 0) != Ppu::dmg_shade(3),
                    "an 8x16 sprite ignores bit 0 of its tile index",
                    "the odd tile index was used as is");
+        }
+    }
+
+    // === Game Boy Color (subject V.6) =======================================
+    //  The CGB is not "a DMG with colours added". Four things change shape:
+    //  the palettes become real 15-bit colours held in their own RAM, video
+    //  memory gains a second bank holding per-tile attributes, LCDC bit 0
+    //  changes meaning entirely, and the CPU can run twice as fast while the
+    //  screen does not. These checks pin each of them down.
+    if (verbose) std::printf("\n== Game Boy Color ==\n");
+
+    // --- Colour conversion --------------------------------------------------
+    {
+        // Five bits per channel, expanded with (v << 3) | (v >> 2) so that 31
+        // reaches 255. Using (v << 3) alone would cap white at 248 and every
+        // captured screen would be subtly wrong.
+        report(Ppu::cgb_color(0x7FFF) == 0xFFFFFFFFu,
+               "colour 31,31,31 is pure white", "white was not 0xFFFFFF");
+        report(Ppu::cgb_color(0x0000) == 0xFF000000u,
+               "colour 0,0,0 is pure black", "black was not 0x000000");
+        report(Ppu::cgb_color(0x001F) == 0xFFFF0000u,
+               "the low five bits are the RED channel", "the channel order is wrong");
+        report(Ppu::cgb_color(0x7C00) == 0xFF0000FFu,
+               "the high five bits are the BLUE channel", "the channel order is wrong");
+        report(Ppu::cgb_color(0x7EED) == 0xFF6BBDFFu,
+               "a mixed colour matches the reference image", "the expansion formula is wrong");
+    }
+
+    // --- Palette RAM --------------------------------------------------------
+    {
+        Bench b; b.load({0x00}, Model::Cgb);
+        // Bit 7 of the index register means "advance after every write", which
+        // is how a game pushes 64 bytes through a one-byte window.
+        b.bus().poke(0xFF68, 0x80);
+        for (int i = 0; i < 8; ++i) b.bus().poke(0xFF69, static_cast<u8>(0x10 + i));
+        bool ok = true;
+        for (int i = 0; i < 8; ++i)
+            if (b.bus().ppu().bg_palette()[static_cast<std::size_t>(i)] != 0x10 + i) ok = false;
+        report(ok, "BCPD writes eight bytes in a row with auto-increment",
+               "the palette index did not advance");
+        report((b.bus().peek(0xFF68) & 0x3F) == 8,
+               "and the index lands just past the last byte",
+               "the index ended somewhere else");
+    }
+    {
+        Bench b; b.load({0x00}, Model::Cgb);
+        b.bus().poke(0xFF68, 0x00);          // no auto-increment
+        b.bus().poke(0xFF69, 0x11);
+        b.bus().poke(0xFF69, 0x22);
+        report(b.bus().ppu().bg_palette()[0] == 0x22 &&
+               b.bus().ppu().bg_palette()[1] == 0xFF,
+               "without bit 7 every write lands on the same byte",
+               "the index advanced when it should not have");
+        report(b.bus().peek(0xFF69) == 0x22, "BCPD reads the byte back",
+               "reading the palette gave the wrong byte");
+    }
+    {
+        Bench b; b.load({0x00}, Model::Cgb);
+        b.bus().poke(0xFF6A, 0x80);
+        b.bus().poke(0xFF6B, 0x5A);
+        report(b.bus().ppu().obj_palette()[0] == 0x5A &&
+               b.bus().ppu().bg_palette()[0] == 0xFF,
+               "OCPS/OCPD reach the SPRITE palettes, not the background ones",
+               "the two palette blocks are crossed");
+    }
+    {
+        // On a DMG none of this hardware exists: the addresses are not routed
+        // to the PPU at all.
+        Bench b; b.load({0x00}, Model::Dmg);
+        b.bus().poke(0xFF68, 0x80);
+        b.bus().poke(0xFF69, 0x33);
+        report(b.bus().ppu().bg_palette()[0] == 0xFF,
+               "a DMG has no colour palettes", "a DMG wrote into palette RAM");
+    }
+    {
+        Bench b; b.load({0x00}, Model::Cgb, /*colour_cartridge=*/false);
+        report(!b.bus().ppu().cgb(),
+               "a CGB running a black-and-white cartridge renders like a DMG",
+               "compatibility mode did not engage");
+        Bench c; c.load({0x00}, Model::Cgb);
+        report(c.bus().ppu().cgb(), "and like a CGB for a colour cartridge",
+               "colour rendering did not engage");
+    }
+
+    // --- The colour renderer -------------------------------------------------
+    {
+        // A bench with known palettes and known tiles.
+        //   tile 1  row 0 = 0x3C/0x7E -> 0 2 3 3 3 3 2 0
+        //   tile 2  row 0 = 0x80/0x00 -> colour 1 at x = 0 only (asymmetric,
+        //           so a flip is visible)
+        //   tile 3  rows all 0xFF/0xFF -> colour 3 everywhere (a solid sprite)
+        auto make_cgb = [](Bench &b) {
+            b.load({0x00}, Model::Cgb);
+
+            // Background palette 0: black, red, green, blue.
+            const u16 bg0[4] = {0x0000, 0x001F, 0x03E0, 0x7C00};
+            b.bus().poke(0xFF68, 0x80);
+            for (int i = 0; i < 4; ++i) {
+                b.bus().poke(0xFF69, static_cast<u8>(bg0[i] & 0xFF));
+                b.bus().poke(0xFF69, static_cast<u8>(bg0[i] >> 8));
+            }
+            // Background palette 1: colour 2 is white, so "which palette was
+            // used" is a single pixel comparison.
+            const u16 bg1[4] = {0x0000, 0x0000, 0x7FFF, 0x0000};
+            for (int i = 0; i < 4; ++i) {
+                b.bus().poke(0xFF69, static_cast<u8>(bg1[i] & 0xFF));
+                b.bus().poke(0xFF69, static_cast<u8>(bg1[i] >> 8));
+            }
+            // Sprite palette 0: colour 3 white. Sprite palette 1: colour 3 red.
+            const u16 obj0[4] = {0x0000, 0x0000, 0x0000, 0x7FFF};
+            const u16 obj1[4] = {0x0000, 0x0000, 0x0000, 0x001F};
+            b.bus().poke(0xFF6A, 0x80);
+            for (int i = 0; i < 4; ++i) {
+                b.bus().poke(0xFF6B, static_cast<u8>(obj0[i] & 0xFF));
+                b.bus().poke(0xFF6B, static_cast<u8>(obj0[i] >> 8));
+            }
+            for (int i = 0; i < 4; ++i) {
+                b.bus().poke(0xFF6B, static_cast<u8>(obj1[i] & 0xFF));
+                b.bus().poke(0xFF6B, static_cast<u8>(obj1[i] >> 8));
+            }
+
+            b.bus().poke(0x8010, 0x3C); b.bus().poke(0x8011, 0x7E);   // tile 1
+            b.bus().poke(0x8020, 0x80); b.bus().poke(0x8021, 0x00);   // tile 2
+            for (int i = 0; i < 16; ++i) b.bus().poke(static_cast<u16>(0x8030 + i), 0xFF);
+            b.bus().poke(0x9800, 0x01);                               // map cell -> tile 1
+
+            // The reset value of LCDC leaves sprites switched off. Every check
+            // below needs them, so turn them on once, here.
+            b.bus().poke(0xFF40, 0x93);   // screen on, 0x8000 tile data, BG + OBJ
+        };
+        auto set_attr = [](Bench &b, u16 map_addr, u8 attr) {
+            b.bus().poke(0xFF4F, 0x01);      // VRAM bank 1
+            b.bus().poke(map_addr, attr);
+            b.bus().poke(0xFF4F, 0x00);
+        };
+        auto pixel = [](Bench &b, int x, int y) {
+            return b.bus().ppu().framebuffer()[static_cast<std::size_t>(y) * kScreenWidth + x];
+        };
+        const u32 kWhite = 0xFFFFFFFFu, kRed = 0xFFFF0000u;
+        const u32 kGreen = 0xFF00FF00u, kBlue = 0xFF0000FFu;
+
+        {
+            Bench b; make_cgb(b);
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 1, 0) == kGreen && pixel(b, 2, 0) == kBlue,
+                   "the background takes its colours from palette RAM",
+                   "the CGB background palette was not used");
+        }
+        {
+            Bench b; make_cgb(b);
+            set_attr(b, 0x9800, 0x01);       // this tile uses background palette 1
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 1, 0) == kWhite,
+                   "attribute bits 0-2 select one of the eight palettes",
+                   "the tile attribute did not change the palette");
+        }
+        {
+            Bench b; make_cgb(b);
+            b.bus().poke(0x9800, 0x02);      // tile 2: colour 1 at x = 0 only
+            b.bus().tick(kTCyclesPerFrame);
+            const bool before = pixel(b, 0, 0) == kRed && pixel(b, 7, 0) != kRed;
+
+            Bench c; make_cgb(c);
+            c.bus().poke(0x9800, 0x02);
+            set_attr(c, 0x9800, 0x20);       // horizontal flip
+            c.bus().tick(kTCyclesPerFrame);
+            report(before && pixel(c, 7, 0) == kRed && pixel(c, 0, 0) != kRed,
+                   "attribute bit 5 flips a background tile horizontally",
+                   "horizontal flip did nothing, or flipped the wrong way");
+        }
+        {
+            Bench b; make_cgb(b);
+            b.bus().poke(0x9800, 0x02);
+            set_attr(b, 0x9800, 0x40);       // vertical flip: row 0 moves to row 7
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 0, 7) == kRed && pixel(b, 0, 0) != kRed,
+                   "attribute bit 6 flips a background tile vertically",
+                   "vertical flip did nothing, or flipped the wrong way");
+        }
+        {
+            Bench b; make_cgb(b);
+            // The same tile index, but its pixels live in the other bank.
+            b.bus().poke(0xFF4F, 0x01);
+            b.bus().poke(0x8010, 0x00); b.bus().poke(0x8011, 0xFF);   // all colour 2
+            b.bus().poke(0xFF4F, 0x00);
+            set_attr(b, 0x9800, 0x08);       // tile data from VRAM bank 1
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 0, 0) == kGreen && pixel(b, 7, 0) == kGreen,
+                   "attribute bit 3 takes the tile from VRAM bank 1",
+                   "the second VRAM bank was not used for tile data");
+        }
+        {
+            // Sprites. One solid 8x8 sprite at the top-left corner.
+            Bench b; make_cgb(b);
+            b.bus().poke(0xFE00, 16);        // Y: top of the screen
+            b.bus().poke(0xFE01, 8);         // X: left edge
+            b.bus().poke(0xFE02, 0x03);      // tile 3, solid colour 3
+            b.bus().poke(0xFE03, 0x00);      // sprite palette 0
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 0, 0) == kWhite,
+                   "a sprite takes its colours from the sprite palettes",
+                   "the CGB sprite palette was not used");
+        }
+        {
+            Bench b; make_cgb(b);
+            b.bus().poke(0xFE00, 16); b.bus().poke(0xFE01, 8);
+            b.bus().poke(0xFE02, 0x03); b.bus().poke(0xFE03, 0x08);  // bank 1
+            b.bus().poke(0xFF4F, 0x01);
+            for (int i = 0; i < 16; ++i) b.bus().poke(static_cast<u16>(0x8030 + i), 0x00);
+            b.bus().poke(0x8030, 0x00); b.bus().poke(0x8031, 0xFF);  // colour 2 in bank 1
+            b.bus().poke(0xFF4F, 0x00);
+            b.bus().poke(0xFF6A, 0x80 | 4); // sprite palette 0, colour 2
+            b.bus().poke(0xFF6B, 0xE0); b.bus().poke(0xFF6B, 0x03);  // green
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 0, 0) == kGreen,
+                   "a sprite may take its tile from VRAM bank 1",
+                   "the sprite ignored its VRAM bank bit");
+        }
+        {
+            // BG-to-OAM priority: the TILE says "sprites stay behind me".
+            Bench b; make_cgb(b);
+            set_attr(b, 0x9800, 0x80);
+            b.bus().poke(0xFE00, 16); b.bus().poke(0xFE01, 8);
+            b.bus().poke(0xFE02, 0x03); b.bus().poke(0xFE03, 0x00);
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 1, 0) == kGreen,
+                   "attribute bit 7 keeps a sprite behind the background",
+                   "BG-to-OAM priority was ignored");
+            report(pixel(b, 0, 0) == kWhite,
+                   "but background colour 0 never wins",
+                   "the sprite was hidden by a transparent background pixel");
+        }
+        {
+            // Master priority: LCDC bit 0 clear overrules the attribute.
+            Bench b; make_cgb(b);
+            set_attr(b, 0x9800, 0x80);
+            b.bus().poke(0xFE00, 16); b.bus().poke(0xFE01, 8);
+            b.bus().poke(0xFE02, 0x03); b.bus().poke(0xFE03, 0x00);
+            b.bus().poke(0xFF40, 0x92);      // sprites on, LCDC bit 0 clear
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 1, 0) == kWhite,
+                   "LCDC bit 0 clear puts every sprite in front (master priority)",
+                   "master priority did not override the tile attribute");
+        }
+        {
+            // ... and the same bit does NOT blank the background, which is
+            // exactly what it does on a DMG.
+            Bench b; make_cgb(b);
+            b.bus().poke(0xFF40, 0x90);      // objects off, LCDC bit 0 clear
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 1, 0) == kGreen,
+                   "on a CGB, LCDC bit 0 does not blank the background",
+                   "the background disappeared as it would on a DMG");
+        }
+        {
+            // Sprite against sprite. Two overlap; which one wins depends on
+            // the rule 0xFF6C selects.
+            auto two_sprites = [&](Bench &b) {
+                make_cgb(b);
+                b.bus().poke(0xFE00, 16); b.bus().poke(0xFE01, 12);
+                b.bus().poke(0xFE02, 0x03); b.bus().poke(0xFE03, 0x00);  // palette 0
+                b.bus().poke(0xFE04, 16); b.bus().poke(0xFE05, 8);
+                b.bus().poke(0xFE06, 0x03); b.bus().poke(0xFE07, 0x01);  // palette 1
+            };
+            Bench b; two_sprites(b);
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 4, 0) == kWhite,
+                   "by default the sprite earliest in OAM wins (the CGB rule)",
+                   "sprite priority did not follow OAM order");
+
+            Bench c; two_sprites(c);
+            c.bus().poke(0xFF6C, 0x01);      // OPRI: back to the DMG rule
+            c.bus().tick(kTCyclesPerFrame);
+            report(pixel(c, 4, 0) == kRed,
+                   "OPRI bit 0 switches back to the DMG rule (leftmost wins)",
+                   "OPRI did not change the priority rule");
+        }
+    }
+
+    // --- VRAM DMA (0xFF51-0xFF55) -------------------------------------------
+    {
+        auto prepare = [](Bench &b) {
+            b.load({0x00}, Model::Cgb);
+            for (int i = 0; i < 64; ++i)
+                b.bus().poke(static_cast<u16>(0xC000 + i), static_cast<u8>(0xA0 + i));
+            b.bus().poke(0xFF51, 0xC0);      // source 0xC000
+            b.bus().poke(0xFF52, 0x00);
+            b.bus().poke(0xFF53, 0x00);      // destination 0x8000
+            b.bus().poke(0xFF54, 0x00);
+        };
+        {
+            Bench b; prepare(b);
+            b.bus().poke(0xFF55, 0x00);      // general purpose, one 16-byte block
+            bool ok = true;
+            for (int i = 0; i < 16; ++i)
+                if (b.bus().peek(static_cast<u16>(0x8000 + i)) != 0xA0 + i) ok = false;
+            report(ok, "a general-purpose VRAM DMA copies one block at once",
+                   "the block did not arrive in video memory");
+            report(b.bus().peek(0x8010) == 0x00,
+                   "and stops exactly at sixteen bytes", "it copied too much");
+            report(b.bus().peek(0xFF55) == 0xFF,
+                   "HDMA5 reads 0xFF once the transfer is done",
+                   "HDMA5 still reported a transfer");
+        }
+        {
+            Bench b; prepare(b);
+            b.bus().poke(0xFF55, 0x03);      // four blocks
+            bool ok = true;
+            for (int i = 0; i < 64; ++i)
+                if (b.bus().peek(static_cast<u16>(0x8000 + i)) != 0xA0 + i) ok = false;
+            report(ok, "the block count is the low seven bits, plus one",
+                   "the wrong number of blocks was copied");
+        }
+        {
+            // Through a real CPU write the transfer costs time: the console
+            // freezes while it happens.
+            Bench b; prepare(b);
+            const u64 before = b.bus().clock().t_cpu();
+            b.bus().write(0xFF55, 0x00);
+            const u64 spent = b.bus().clock().t_cpu() - before;
+            report(spent == 4 + 8 * 4,
+                   "a general-purpose transfer freezes the CPU while it runs",
+                   "the transfer took " + std::to_string(spent) + " cycles instead of 36");
+        }
+        {
+            // HBlank mode: sixteen bytes per scanline, in the gap the PPU
+            // leaves between lines. This is what makes a CGB able to rewrite
+            // a whole screen without losing a frame.
+            Bench b; prepare(b);
+            b.bus().poke(0xFF55, 0x83);      // HBlank mode, four blocks
+            report(b.bus().hdma_active() && b.bus().hdma_remaining() == 64,
+                   "an HBlank transfer is armed, not run",
+                   "the HBlank transfer ran immediately");
+            report(b.bus().peek(0x8000) == 0x00,
+                   "and nothing has moved yet", "bytes moved before the first HBlank");
+
+            b.bus().tick(kDotsPerLine);      // exactly one HBlank
+            report(b.bus().hdma_remaining() == 48 && b.bus().peek(0x8000) == 0xA0,
+                   "one scanline moves exactly sixteen bytes",
+                   "the HBlank transfer moved the wrong amount");
+
+            b.bus().tick(kDotsPerLine);
+            report(b.bus().hdma_remaining() == 32 && b.bus().peek(0x8010) == 0xB0,
+                   "and the next scanline moves the next sixteen",
+                   "the transfer did not continue");
+
+            b.bus().poke(0xFF55, 0x00);      // bit 7 clear cancels it
+            report(!b.bus().hdma_active() && b.bus().peek(0xFF55) == 0x81,
+                   "writing bit 7 clear cancels a running HBlank transfer",
+                   "the transfer was not cancelled, or HDMA5 reported it wrongly");
+
+            b.bus().tick(kDotsPerLine);
+            report(b.bus().hdma_remaining() == 32,
+                   "and a cancelled transfer moves nothing more",
+                   "the cancelled transfer kept going");
+        }
+    }
+
+    // --- Double speed (KEY1, 0xFF4D) ----------------------------------------
+    {
+        {
+            Bench b; b.load({0x10, 0x00}, Model::Cgb);   // STOP
+            report(b.bus().peek(0xFF4D) == 0x7E,
+                   "KEY1 reads 0x7E at normal speed with no switch pending",
+                   "KEY1 read back something else");
+            b.bus().poke(0xFF4D, 0x01);                  // arm the switch
+            b.step();
+            report(b.bus().clock().double_speed(),
+                   "STOP with the switch armed doubles the CPU clock",
+                   "the speed switch did not happen");
+            report(!b.cpu().stopped(),
+                   "and the CPU does NOT stop", "STOP froze a CGB that was switching speed");
+            report(b.bus().peek(0xFF4D) == 0xFE,
+                   "KEY1 then reports double speed and no pending switch",
+                   "KEY1 did not reflect the new speed");
+        }
+        {
+            Bench b; b.load({0x10, 0x00}, Model::Cgb);
+            b.bus().poke(0xFF4D, 0x01);
+            b.step();
+            // The screen does not speed up: that is the whole point of the two
+            // clock domains introduced in step 3.
+            const u64 sys_before = b.bus().clock().t_sys();
+            const u64 cpu_before = b.bus().clock().t_cpu();
+            b.bus().tick(8);
+            report(b.bus().clock().t_cpu() - cpu_before == 8 &&
+                   b.bus().clock().t_sys() - sys_before == 4,
+                   "at double speed the PPU still gets half the cycles",
+                   "the two clock domains did not diverge");
+        }
+        {
+            Bench b; b.load({0x10, 0x00}, Model::Cgb);
+            b.step();                                    // no switch armed
+            report(b.cpu().stopped() && !b.bus().clock().double_speed(),
+                   "without an armed switch, STOP still stops the CPU",
+                   "STOP did not stop");
+        }
+        {
+            Bench b; b.load({0x10, 0x00}, Model::Dmg);
+            b.bus().poke(0xFF4D, 0x01);                  // no such register here
+            b.step();
+            report(b.cpu().stopped() && !b.bus().clock().double_speed(),
+                   "a DMG has no speed switch at all", "a DMG switched speed");
         }
     }
 

@@ -100,7 +100,9 @@ public:
     // Debugger-side write. Same dispatch as write(), but the clock does not
     // advance, so poking a value while single-stepping does not consume time
     // the emulated program never spent.
-    void poke(u16 addr, u8 value) { dispatch_write(addr, value); }
+    // `timed` is false here: a poke never charges the clock, even for the
+    // registers that freeze the CPU on real hardware (decision D15).
+    void poke(u16 addr, u8 value) { dispatch_write(addr, value, false); }
 
     // --- Clock -------------------------------------------------------------
     // `t` is in the CPU domain; components are fed from the domain they
@@ -109,6 +111,16 @@ public:
 
     const Clock &clock() const { return clock_; }
     void set_double_speed(bool on) { clock_.set_double_speed(on); }
+
+    // --- CGB speed switch (KEY1, 0xFF4D) -----------------------------------
+    //  A game asks for the switch by setting bit 0 of KEY1 and then executing
+    //  STOP. The CPU calls these two; nothing else does.
+    bool speed_switch_armed() const { return model_ == Model::Cgb && (key1_ & 0x01) != 0; }
+    void perform_speed_switch();
+
+    // --- CGB VRAM DMA (0xFF51-0xFF55) --------------------------------------
+    bool hdma_active() const { return hdma_active_; }
+    u16  hdma_remaining() const { return hdma_length_; }
 
     // Number of ticking accesses performed, for tests and the debugger.
     u64 access_count() const { return access_count_; }
@@ -152,11 +164,16 @@ private:
     bool cpu_blocked_by_dma(u16 addr) const;
 
     u8   dispatch_read(u16 addr) const;
-    void dispatch_write(u16 addr, u8 value);
+    void dispatch_write(u16 addr, u8 value, bool timed = true);
 
     // WRAM bank visible at 0xD000-0xDFFF. Always 1 on DMG; on CGB the SVBK
     // register selects 1-7, and the value 0 is treated as 1 by the hardware.
     std::size_t wram_bank() const;
+
+    // --- CGB VRAM DMA ------------------------------------------------------
+    void hdma_write_control(u8 value, bool timed);   // a write to 0xFF55 starts or stops it
+    void hdma_transfer_block();          // move the next 16 bytes
+    void hdma_service_hblank();          // called when the PPU enters HBlank
 
     Cartridge cartridge_;
     Ppu       ppu_;
@@ -180,7 +197,17 @@ private:
 
     u8  interrupt_enable_ = 0;   // 0xFFFF
     u8  svbk_             = 1;   // 0xFF70, CGB WRAM bank select
+    u8  key1_             = 0;   // 0xFF4D, CGB speed switch
     u64 access_count_     = 0;
+
+    // --- CGB VRAM DMA state ------------------------------------------------
+    //  The source and destination are written one nibble-aligned half at a
+    //  time through four registers; only the assembled addresses matter.
+    u16  hdma_source_ = 0;
+    u16  hdma_dest_   = 0;      // always inside VRAM
+    u16  hdma_length_ = 0;      // bytes still to move, always a multiple of 16
+    bool hdma_active_ = false;  // an HBlank transfer is in progress
+    std::array<u8, 4> hdma_regs_{};   // 0xFF51-0xFF54, so they read back
 };
 
 }  // namespace retroemu

@@ -65,6 +65,28 @@ enum LcdcBit : u8 {
     LcdcEnable        = 0x80,   // the screen itself
 };
 
+// CGB background/window tile attributes. They live at the SAME address as the
+// tile index, but in VRAM BANK 1 (subject V.6, p.8). On a DMG that bank does
+// not exist and every attribute reads as zero, which is why the two renderers
+// can share one code path.
+enum BgAttrBit : u8 {
+    BgAttrPalette  = 0x07,   // which of the eight background palettes
+    BgAttrBank     = 0x08,   // tile data comes from VRAM bank 1
+    BgAttrXFlip    = 0x20,
+    BgAttrYFlip    = 0x40,
+    BgAttrPriority = 0x80,   // this tile wins over sprites (BG-to-OAM priority)
+};
+
+// CGB sprite attribute bits that the DMG does not have. Bits 4-7 keep their
+// DMG meaning (DMG palette, X flip, Y flip, OBJ-to-BG priority).
+enum ObjAttrBit : u8 {
+    ObjAttrCgbPalette = 0x07,
+    ObjAttrBank       = 0x08,
+};
+
+// Colour palette RAM: eight palettes of four colours, two bytes each.
+inline constexpr std::size_t kCgbPaletteBytes = 64;
+
 enum class PpuMode : u8 {
     HBlank  = 0,
     VBlank  = 1,
@@ -76,7 +98,10 @@ const char *to_string(PpuMode mode);
 
 class Ppu {
 public:
-    void reset(Model model);
+    // `dmg_compatibility` is set when a CGB is running a cartridge that knows
+    // nothing about colour: the extra hardware is present, but the renderer
+    // behaves like a DMG. See docs/decisions.md (D58).
+    void reset(Model model, bool dmg_compatibility = false);
 
     // --- Memory owned by the PPU -------------------------------------------
     u8   read_vram(u16 addr) const;
@@ -105,6 +130,10 @@ public:
     // image is ready to present.
     bool take_frame_ready() { const bool f = frame_ready_; frame_ready_ = false; return f; }
 
+    // True once per visible line, the moment HBlank begins. The CGB's HBlank
+    // DMA moves its next 16 bytes exactly there (step 14).
+    bool take_hblank_entered() { const bool f = hblank_entered_; hblank_entered_ = false; return f; }
+
     // --- The produced image -------------------------------------------------
     //  160x144 pixels in ARGB8888, rebuilt one scanline at a time at the end
     //  of mode 3. This is what the frontend puts on screen.
@@ -115,16 +144,25 @@ public:
     // only ever select one of these four.
     static u32 dmg_shade(u8 index);
 
+    // A CGB colour is 15 bits, five per channel, stored little-endian as
+    // -bbbbbgg gggrrrrr. The expansion to 8 bits per channel is the one the
+    // cgb-acid2 author documents, so a capture can be compared byte for byte
+    // with the reference image.
+    static u32 cgb_color(u16 bgr555);
+
     // --- Inspection --------------------------------------------------------
     u8      ly() const     { return ly_; }
     PpuMode mode() const   { return mode_; }
     bool    lcd_on() const { return (lcdc_ & LcdcEnable) != 0; }
     u32     dot() const    { return dot_; }
+    bool    cgb() const    { return cgb_; }
     u64     elapsed() const { return elapsed_; }
     u64     frames() const  { return frames_; }
 
     const std::array<u8, kVramBankSize * kVramBanks> &vram() const { return vram_; }
     const std::array<u8, kOamSize>                   &oam()  const { return oam_; }
+    const std::array<u8, kCgbPaletteBytes> &bg_palette()  const { return bg_palette_; }
+    const std::array<u8, kCgbPaletteBytes> &obj_palette() const { return obj_palette_; }
 
 private:
     void step_dot();
@@ -132,8 +170,14 @@ private:
 
     // --- Rendering, run once per visible line at the end of mode 3 ---------
     void render_scanline();
-    void render_background(u8 line, std::array<u8, kScreenWidth> &bg_color);
-    void render_sprites(u8 line, const std::array<u8, kScreenWidth> &bg_color);
+    void render_background(u8 line, std::array<u8, kScreenWidth> &bg_color,
+                           std::array<u8, kScreenWidth> &bg_attr);
+    void render_sprites(u8 line, const std::array<u8, kScreenWidth> &bg_color,
+                        const std::array<u8, kScreenWidth> &bg_attr);
+
+    // Look a colour index up in one of the eight CGB palettes.
+    u32 cgb_palette_color(const std::array<u8, kCgbPaletteBytes> &palette,
+                          u8 index, u8 color) const;
 
     // Raw VRAM access by bank, for the renderer. Unlike read_vram it ignores
     // the VBK register: the renderer decides which bank it wants.
@@ -182,6 +226,23 @@ private:
     // halfway down the screen starts from its own first row, not from the
     // screen's.
     u8 window_line_ = 0;
+
+    // --- CGB additions (step 14) -------------------------------------------
+    //  BCPS/OCPS (0xFF68/0xFF6A) hold an index into palette RAM plus an
+    //  auto-increment bit, and BCPD/OCPD (0xFF69/0xFF6B) are the window onto
+    //  the byte it points at. Games write 64 bytes through a 1-byte hole.
+    std::array<u8, kCgbPaletteBytes> bg_palette_{};
+    std::array<u8, kCgbPaletteBytes> obj_palette_{};
+    u8 bcps_ = 0;      // 0xFF68
+    u8 ocps_ = 0;      // 0xFF6A
+    u8 opri_ = 0;      // 0xFF6C  0 = sprite priority by OAM index (CGB rule)
+
+    // True when the colour renderer is in use: a CGB running a cartridge that
+    // asks for colour. A CGB running a black-and-white cartridge leaves this
+    // false and renders exactly like a DMG.
+    bool cgb_ = false;
+
+    bool hblank_entered_ = false;
 
     u8  vram_bank_ = 0;
     u64 elapsed_   = 0;

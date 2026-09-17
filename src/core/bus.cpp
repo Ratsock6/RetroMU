@@ -52,7 +52,12 @@ void Bus::attach(Cartridge cartridge, Model model)
 
 void Bus::reset()
 {
-    ppu_.reset(model_);
+    // A CGB running a cartridge that knows nothing about colour keeps all the
+    // extra hardware but draws in black and white, exactly as the console does
+    // (decision D58). The cartridge header is what decides.
+    const bool dmg_compatibility =
+        model_ == Model::Cgb && cartridge_.header().cgb == CgbSupport::None;
+    ppu_.reset(model_, dmg_compatibility);
     timer_.reset(model_);
     dma_.reset();
     joypad_.reset();
@@ -63,7 +68,13 @@ void Bus::reset()
     serial_.clear();
     interrupt_enable_ = 0;
     svbk_             = 1;
+    key1_             = 0;
     access_count_     = 0;
+    hdma_source_ = 0;
+    hdma_dest_   = 0;
+    hdma_length_ = 0;
+    hdma_active_ = false;
+    hdma_regs_.fill(0xFF);
 
     // Values the real boot ROM leaves in the I/O registers. The mandatory part
     // skips the boot sequence (ambiguity A3), so they are applied directly.
@@ -130,6 +141,7 @@ void Bus::tick(u32 t)
     // it gets system cycles. The timer follows the CPU clock, so it gets CPU
     // cycles and does run twice as fast in CGB double-speed mode.
     ppu_.tick(t_sys);
+    if (ppu_.take_hblank_entered()) hdma_service_hblank();
     if (ppu_.take_vblank_irq()) request_interrupt(IntVBlank);
     if (ppu_.take_stat_irq())   request_interrupt(IntStat);
     if (timer_.tick(t))         request_interrupt(IntTimer);
@@ -184,8 +196,29 @@ u8 Bus::dispatch_read(u16 addr) const
             if (addr == kOamDmaRegister) return dma_.source_page();
             if (addr >= 0xFF40 && addr <= 0xFF4B) return ppu_.read(addr);
             if (addr == 0xFF0F) return static_cast<u8>(0xE0 | io_[0x0F]);
-            if (addr == 0xFF4F && model_ == Model::Cgb) return ppu_.vram_bank_register();
-            if (addr == 0xFF70 && model_ == Model::Cgb) return svbk_;
+            if (model_ == Model::Cgb) {
+                if (addr == 0xFF4F) return ppu_.vram_bank_register();
+                if (addr == 0xFF70) return svbk_;
+                // KEY1: bit 7 is the speed the CPU is running at right now,
+                // bit 0 is "a switch has been asked for". Everything else
+                // reads as 1.
+                if (addr == 0xFF4D) {
+                    return static_cast<u8>(0x7E | (clock_.double_speed() ? 0x80 : 0x00)
+                                                | (key1_ & 0x01));
+                }
+                // HDMA1-4 are write-only on the real chip: the source and
+                // destination cannot be read back, only HDMA5 reports state.
+                if (addr >= 0xFF51 && addr <= 0xFF54) return 0xFF;
+                // HDMA5 reports the transfer that is still to come. Bit 7 set
+                // means "nothing running"; the low seven bits are the number
+                // of 16-byte blocks left, minus one.
+                if (addr == 0xFF55) {
+                    if (hdma_length_ == 0) return 0xFF;
+                    const u8 blocks = static_cast<u8>((hdma_length_ / 16) - 1);
+                    return static_cast<u8>((hdma_active_ ? 0x00 : 0x80) | (blocks & 0x7F));
+                }
+                if (addr >= 0xFF68 && addr <= 0xFF6C) return ppu_.read(addr);
+            }
             // Every other register is still a plain byte; steps 7, 8 and 11
             // route them to the timer, the PPU and the joypad.
             return io_[addr - 0xFF00];
@@ -202,7 +235,7 @@ u8 Bus::dispatch_read(u16 addr) const
 // ---------------------------------------------------------------------------
 //  Write dispatch
 // ---------------------------------------------------------------------------
-void Bus::dispatch_write(u16 addr, u8 value)
+void Bus::dispatch_write(u16 addr, u8 value, bool timed)
 {
     switch (region_of(addr)) {
         // Writing "into ROM" stores nothing. The bytes reach the cartridge's
@@ -227,7 +260,7 @@ void Bus::dispatch_write(u16 addr, u8 value)
             return;
 
         case MemRegion::EchoRam:
-            dispatch_write(static_cast<u16>(addr - 0x2000), value);
+            dispatch_write(static_cast<u16>(addr - 0x2000), value, timed);
             return;
 
         case MemRegion::Oam:
@@ -256,8 +289,14 @@ void Bus::dispatch_write(u16 addr, u8 value)
                 return;
             }
             if (addr == 0xFF0F) { io_[0x0F] = static_cast<u8>(value & 0x1F); return; }
-            if (addr == 0xFF4F && model_ == Model::Cgb) { ppu_.set_vram_bank_register(value); return; }
-            if (addr == 0xFF70 && model_ == Model::Cgb) { svbk_ = value & 0x07; return; }
+            if (model_ == Model::Cgb) {
+                if (addr == 0xFF4F) { ppu_.set_vram_bank_register(value); return; }
+                if (addr == 0xFF70) { svbk_ = value & 0x07; return; }
+                if (addr == 0xFF4D) { key1_ = static_cast<u8>(value & 0x01); return; }
+                if (addr >= 0xFF51 && addr <= 0xFF54) { hdma_regs_[addr - 0xFF51] = value; return; }
+                if (addr == 0xFF55) { hdma_write_control(value, timed); return; }
+                if (addr >= 0xFF68 && addr <= 0xFF6C) { ppu_.write(addr, value); return; }
+            }
             io_[addr - 0xFF00] = value;
             return;
 
@@ -269,6 +308,101 @@ void Bus::dispatch_write(u16 addr, u8 value)
             interrupt_enable_ = value;
             return;
     }
+}
+
+// ---------------------------------------------------------------------------
+//  CGB speed switch (KEY1, 0xFF4D)
+// ---------------------------------------------------------------------------
+//  A game writes 1 to KEY1 and then executes STOP. The console does not stop:
+//  it changes the CPU's clock and carries on. This is the whole reason the
+//  clock was split into two domains back in step 3 — the CPU and the timer
+//  now run twice as fast while the PPU keeps refreshing the screen 59.727
+//  times a second.
+//
+//  The switch is not free: the machine is frozen for about 2050 machine
+//  cycles while the clock settles, and the divider is reset.
+// ---------------------------------------------------------------------------
+void Bus::perform_speed_switch()
+{
+    if (!speed_switch_armed()) return;
+
+    key1_ = 0;                      // the request is consumed
+    timer_.write(0xFF04, 0);        // writing DIV resets the internal counter
+    clock_.set_double_speed(!clock_.double_speed());
+    tick(2050 * kTCyclesPerMCycle); // the pause the hardware takes
+}
+
+// ---------------------------------------------------------------------------
+//  CGB VRAM DMA (0xFF51-0xFF55)
+// ---------------------------------------------------------------------------
+//  The OAM copier of step 10 moves 160 bytes into the sprite table. This one
+//  moves up to 2 KiB into VIDEO memory, which is what makes full-screen
+//  animation possible on a CGB, and it comes in two flavours:
+//
+//    general purpose  the whole block at once. The CPU is frozen throughout.
+//    HBlank           16 bytes at the start of every HBlank. The CPU keeps
+//                     running in between, and the transfer spreads itself
+//                     over as many scanlines as it needs.
+//
+//  HBlank mode is the interesting one: it is the only way to push a large
+//  amount of data into VRAM without giving up a whole frame, because it uses
+//  the small gaps the PPU leaves between scanlines.
+// ---------------------------------------------------------------------------
+void Bus::hdma_transfer_block()
+{
+    // peek/poke, never read/write: the copier is not the CPU, so it must not
+    // charge its accesses to the clock a second time (decision D15).
+    for (int i = 0; i < 16; ++i) {
+        const u8 byte = peek(static_cast<u16>(hdma_source_ + i));
+        // The destination always lands inside VRAM, whatever was written.
+        poke(static_cast<u16>(0x8000 | ((hdma_dest_ + i) & 0x1FFF)), byte);
+    }
+    hdma_source_ = static_cast<u16>(hdma_source_ + 16);
+    hdma_dest_   = static_cast<u16>(hdma_dest_ + 16);
+    hdma_length_ = static_cast<u16>(hdma_length_ - 16);
+    if (hdma_length_ == 0) hdma_active_ = false;
+}
+
+void Bus::hdma_service_hblank()
+{
+    if (!hdma_active_ || hdma_length_ == 0) return;
+    hdma_transfer_block();
+}
+
+void Bus::hdma_write_control(u8 value, bool timed)
+{
+    const u16 length = static_cast<u16>(((value & 0x7F) + 1) * 16);
+
+    if ((value & 0x80) == 0) {
+        // Bit 7 clear has two meanings, and which one applies depends on
+        // whether an HBlank transfer is already running.
+        if (hdma_active_) {
+            // Cancel it. What is left stays readable in HDMA5, so a game can
+            // pick the transfer up again later.
+            hdma_active_ = false;
+            return;
+        }
+
+        // General purpose: everything moves now.
+        hdma_source_ = static_cast<u16>((hdma_regs_[0] << 8) | (hdma_regs_[1] & 0xF0));
+        hdma_dest_   = static_cast<u16>(((hdma_regs_[2] & 0x1F) << 8) | (hdma_regs_[3] & 0xF0));
+        hdma_length_ = length;
+        while (hdma_length_ > 0) {
+            hdma_transfer_block();
+            // The CPU is frozen while this happens, so the time has to be
+            // charged: two bytes per machine cycle at normal speed, one per
+            // machine cycle at double speed.
+            if (timed) tick(kTCyclesPerMCycle * (clock_.double_speed() ? 16 : 8));
+        }
+        hdma_active_ = false;
+        return;
+    }
+
+    // HBlank mode: arm it and let the PPU drive it, 16 bytes at a time.
+    hdma_source_ = static_cast<u16>((hdma_regs_[0] << 8) | (hdma_regs_[1] & 0xF0));
+    hdma_dest_   = static_cast<u16>(((hdma_regs_[2] & 0x1F) << 8) | (hdma_regs_[3] & 0xF0));
+    hdma_length_ = length;
+    hdma_active_ = true;
 }
 
 }  // namespace retroemu

@@ -896,3 +896,137 @@ litter `roms/` with save files.
 The save sits next to the ROM with its extension replaced, and only a dot in
 the final path component counts as an extension, so a directory named
 `my.roms` does not truncate the path.
+
+---
+
+## D54 — The colour renderer is the same code path, not a second one
+
+**Context.** Section V.6 (p.8) requires Game Boy Color support: palettes,
+the extra VRAM bank, tile attributes, HDMA and double speed.
+
+**Decision.** There is ONE background renderer and ONE sprite renderer. The
+CGB additions enter through a single byte — the tile's attribute — which is
+read from VRAM bank 1 on a colour machine and is a hard zero everywhere else:
+
+```cpp
+const u8 attr = cgb_ ? vram_byte(1, map_addr) : 0;
+```
+
+Every attribute test downstream (flip, bank, palette, priority) then falls
+through to the black-and-white behaviour on a DMG without a single `if (cgb)`
+around it. Only three places genuinely differ and are marked as such: which
+palette table a colour index is looked up in, what LCDC bit 0 means, and how
+two overlapping sprites are ranked.
+
+A second `render_background_cgb()` would have been easier to write and would
+have doubled the surface where a bug can hide: dmg-acid2 would no longer
+defend the colour path, nor cgb-acid2 the black-and-white one.
+
+---
+
+## D55 — Five bits to eight: `(v << 3) | (v >> 2)`
+
+**Context.** A CGB colour is 15 bits, five per channel. A screen capture is
+24 bits, eight per channel. The conversion has to be chosen.
+
+**Decision.** `(v << 3) | (v >> 2)`: the top three bits are copied into the
+bottom three, so 31 maps to 255 and 0 maps to 0.
+
+The obvious `v << 3` is wrong in a way that is invisible by eye: white would
+come out as 248,248,248 instead of 255,255,255, and EVERY pixel of a capture
+would be slightly off. It is also the formula the cgb-acid2 author documents
+for automated comparison, which is what lets `tests/run_cgb_tests.sh` use a
+plain `cmp` instead of a per-pixel tolerance.
+
+Real hardware also applies a colour-correction curve — the console's screen is
+dim, so games are authored bright. Emulating it would make captures prettier
+and the reference comparison impossible. It is not applied.
+
+---
+
+## D56 — LCDC bit 0 means two different things, so it is tested twice
+
+**Context.** On a DMG, clearing bit 0 of LCDC blanks the background and the
+window. On a CGB the same bit means "the priority bits decide who covers
+whom"; the background never disappears.
+
+**Decision.** Both meanings live in the code, selected by `cgb_`, and both
+have their own check in `--cpucheck`:
+
+- *LCDC bit 0 blanks the background* (DMG)
+- *on a CGB, LCDC bit 0 does not blank the background*
+
+The second one would pass by accident if the first were simply deleted, which
+is why the pair is kept rather than one general check.
+
+This bit is why the sprite pass receives the background's ATTRIBUTE bytes as
+well as its colour indices: a pixel is covered by the background when the
+sprite asks for it (its own bit 7), or when the tile asks for it (attribute
+bit 7), unless master priority overrules both.
+
+---
+
+## D57 — The VRAM copier lives on the bus, not in the PPU
+
+**Context.** The CGB adds a second DMA engine (0xFF51-0xFF55) which moves up
+to 2 KiB into video memory, either all at once or 16 bytes per HBlank.
+
+**Decision.** It is implemented in `Bus`, like the OAM copier of step 10,
+because its SOURCE can be anywhere — ROM, external RAM, work RAM — and only
+the bus can reach all of that. The PPU's only contribution is a single signal,
+`take_hblank_entered()`, which the bus drains on every tick.
+
+It moves bytes with `peek`/`poke`, never `read`/`write`: the copier is not the
+CPU, so charging its accesses to the clock would count the same time twice
+(decision D15). The time the CPU loses to a general-purpose transfer is
+charged once, explicitly, by the bus.
+
+That same rule forced a small change: `poke` now passes `timed = false` down
+the write dispatch, so that poking 0xFF55 from the debugger performs the
+transfer without advancing the clock. `peek` and `poke` have been free of
+side effects on time since step 5, and the new register does not get to be an
+exception.
+
+---
+
+## D58 — A colour console running a black-and-white cartridge stays in black and white
+
+**Context.** `--cgb` can force the colour machine, and a real CGB happily runs
+DMG cartridges.
+
+**Decision.** The model comes from the cartridge header; `--cgb` overrides it.
+But a CGB running a cartridge that declares no colour support renders through
+the DMG path, with the four classic shades. All the extra hardware is still
+there — the second VRAM bank, the palette registers, the VRAM copier, the
+speed switch — it is simply not used by a game that does not know about it.
+
+The test that proves it is the strongest kind available: `dmg-acid2.gb` forced
+onto a CGB produces a capture byte-for-byte identical to the DMG reference
+image.
+
+A real CGB boot ROM goes one step further and colourises some known DMG games
+from a table indexed by a hash of the cartridge title. That is a boot-ROM
+feature, not a PPU feature, and the mandatory part skips the boot ROM
+(ambiguity A3), so it is not implemented.
+
+---
+
+## D59 — STOP is two instructions wearing one opcode
+
+**Context.** A CGB game switches to double speed by writing 1 to KEY1
+(0xFF4D) and then executing STOP.
+
+**Decision.** The CPU asks the bus whether a switch is armed. If it is, the
+console does not stop: the clock changes speed, the divider is reset, about
+2050 machine cycles are charged for the pause the hardware takes, and
+execution continues at the next instruction.
+
+Getting this wrong is not subtle — a game that uses double speed freezes on
+its first frame — but it is easy to miss, because STOP is a one-line opcode
+that looks finished long before step 14.
+
+This is also the moment the two clock domains introduced in step 3 (decision
+D14) finally pay for themselves. `Clock::advance` already returns system
+cycles, so nothing else in the emulator had to change: the CPU, the timer and
+the sprite copier speed up, and the PPU keeps refreshing the screen 59.727
+times a second because it is fed from the other domain.

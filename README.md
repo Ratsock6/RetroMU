@@ -94,7 +94,7 @@ the test bundle before moving on.
 | 11 | Real-time loop and inputs *(subject V.3, V.4)* | done |
 | 12 | GUI: load / play / pause *(subject Chapter IV)* | done |
 | 13 | MBC1, MBC2, MBC5 and battery saves *(subject V.5)* | done |
-| 14 | CGB: palettes, VRAM bank, HDMA, double speed *(subject V.6)* | todo |
+| 14 | CGB: palettes, VRAM bank, HDMA, double speed *(subject V.6)* | done |
 | 15 | Robustness and finalisation | todo |
 
 ---
@@ -104,7 +104,7 @@ the test bundle before moving on.
 ```bash
 ./tests/run_cartridge_tests.sh    # step 2: header parsing        (18 checks)
 ./tests/run_bus_tests.sh          # step 3: dispatch and clock    (30 checks)
-./tests/run_cpu_tests.sh          # step 4: instruction set       (102 checks + blargg)
+./tests/run_cpu_tests.sh          # step 4: instruction set       (270 checks + blargg)
 ./tests/run_debug_tests.sh        # step 5: disassembler, debugger (22 checks)
 ./tests/run_trace_tests.sh        # step 6: tracer and fingerprints (11 checks)
 ./tests/run_timer_tests.sh        # step 7: interrupts and timer   (8 checks)
@@ -114,6 +114,7 @@ the test bundle before moving on.
 ./tests/run_input_tests.sh        # step 11: loop and inputs      (14 checks)
 ./tests/run_gui_tests.sh          # step 12: the interface        (15 checks)
 ./tests/run_mbc_tests.sh          # step 13: controllers, saves   (16 checks)
+./tests/run_cgb_tests.sh          # step 14: Game Boy Color       (17 checks)
 ```
 
 `run_cartridge_tests.sh` checks the parsed summary of the nine bundled ROMs
@@ -138,6 +139,32 @@ separately:
 They report their verdict through the link port rather than the screen, which
 is what makes it possible to validate the whole instruction set before any
 rendering exists.
+
+`run_cgb_tests.sh` is the colour counterpart: it compares a capture of
+`cgb-acid2.gbc` with the author's reference image byte for byte, checks that
+the picture really uses eight colours rather than four shades, that the
+machine is chosen from the cartridge header, and that a black-and-white
+cartridge forced onto a colour console still produces the DMG picture exactly.
+
+### Colour
+
+A cartridge that declares colour support boots the CGB hardware, and one that
+does not boots a DMG; `--cgb` forces the colour machine either way. What
+changes is not only the palette:
+
+| | DMG | CGB |
+|---|---|---|
+| Colours | four fixed shades, chosen by a 2-bit palette register | eight background and eight sprite palettes of four 15-bit colours, held in their own RAM |
+| Video memory | 8 KiB | 16 KiB: a second bank holding one attribute byte per map cell |
+| Tile attributes | none | palette, VRAM bank, horizontal flip, vertical flip, priority |
+| LCDC bit 0 | "draw the background at all" | "let the priority bits decide"; the background is always drawn |
+| Sprite priority | the leftmost wins | the earliest in OAM wins (switchable through OPRI, 0xFF6C) |
+| Video DMA | 160 bytes into the sprite table | up to 2 KiB into video memory, all at once or 16 bytes per HBlank |
+| CPU clock | fixed | switchable to double speed, while the screen keeps its own |
+
+The captured screen uses the expansion `(v << 3) | (v >> 2)` for each 5-bit
+channel, which is the formula the cgb-acid2 author documents, so a capture can
+be compared with his reference image without any tolerance.
 
 ### Saves
 
@@ -345,6 +372,28 @@ what each of them validates.
 
 **No commercial ROM is present in this repository**, per the subject (p.6 and
 p.11).
+
+### Where the bundle stands
+
+| ROM | Verdict |
+|---|---|
+| `acid2/dmg-acid2.gb` | identical to the reference image, pixel for pixel |
+| `acid2/cgb-acid2.gbc` | identical to the reference image, pixel for pixel |
+| `mooneye/acceptance/div_timing.gb` | pass |
+| `mooneye/acceptance/intr_timing.gb` | pass |
+| `mooneye/acceptance/oam_dma/basic.gb` | pass |
+| `mooneye/mbc1/ram_64kb.gb` | pass |
+| `mooneye/mbc1/rom_512kb.gb` | pass |
+| `mooneye/mbc2/ram.gb` | pass |
+| `mooneye/mbc5/rom_2Mb.gb` | pass |
+
+Reproduce the whole table with:
+
+```bash
+./build/retroemu --mooneye $(find roms -name '*.gb' -path '*mooneye*' | sort)
+./tests/run_render_tests.sh    # dmg-acid2
+./tests/run_cgb_tests.sh       # cgb-acid2
+```
 
 ---
 

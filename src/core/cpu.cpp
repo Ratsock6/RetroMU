@@ -417,6 +417,17 @@ void Cpu::execute(Bus &bus, u8 opcode)
                 }
                 if (y == 2) {                                        // STOP
                     fetch8(bus);          // STOP is followed by a padding byte
+
+                    // On a CGB, STOP has a second job. If the game has armed
+                    // the speed switch by writing to KEY1, the console does
+                    // NOT stop: it changes the CPU clock and carries on. A
+                    // game that uses double speed executes STOP on purpose,
+                    // and treating it as a halt would freeze it on its first
+                    // frame.
+                    if (bus.speed_switch_armed()) {
+                        bus.perform_speed_switch();
+                        return;
+                    }
                     stopped_ = true;
                     return;
                 }

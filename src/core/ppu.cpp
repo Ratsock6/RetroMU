@@ -24,9 +24,13 @@ const char *to_string(PpuMode mode)
     return "?";
 }
 
-void Ppu::reset(Model model)
+void Ppu::reset(Model model, bool dmg_compatibility)
 {
-    (void)model;
+    // A CGB running a colour cartridge uses the colour renderer. A CGB running
+    // a black-and-white cartridge keeps the extra registers but draws like a
+    // DMG, which is what the console itself does (decision D58).
+    cgb_ = (model == Model::Cgb) && !dmg_compatibility;
+
     vram_.fill(0);
     oam_.fill(0);
 
@@ -52,6 +56,16 @@ void Ppu::reset(Model model)
     frame_ready_ = false;
     vram_bank_   = 0;
     window_line_ = 0;
+    hblank_entered_ = false;
+
+    // Palette RAM comes out of the boot sequence full of 0xFF, which is white
+    // in every channel. A game that forgets to set a palette therefore gets a
+    // blank screen rather than a black one.
+    bg_palette_.fill(0xFF);
+    obj_palette_.fill(0xFF);
+    bcps_ = 0;
+    ocps_ = 0;
+    opri_ = 0;
     framebuffer_.fill(dmg_shade(0));
     elapsed_     = 0;
     frames_      = 0;
@@ -112,6 +126,14 @@ u8 Ppu::read(u16 addr) const
         case 0xFF49: return obp1_;
         case 0xFF4A: return wy_;
         case 0xFF4B: return wx_;
+
+        // --- CGB colour palettes ------------------------------------------
+        case 0xFF68: return static_cast<u8>(bcps_ | 0x40);
+        case 0xFF69: return bg_palette_[bcps_ & 0x3F];
+        case 0xFF6A: return static_cast<u8>(ocps_ | 0x40);
+        case 0xFF6B: return obj_palette_[ocps_ & 0x3F];
+        case 0xFF6C: return static_cast<u8>(0xFE | opri_);
+
         default:     return 0xFF;
     }
 }
@@ -158,6 +180,29 @@ void Ppu::write(u16 addr, u8 value)
         case 0xFF49: obp1_ = value; return;
         case 0xFF4A: wy_ = value; return;
         case 0xFF4B: wx_ = value; return;
+
+        // --- CGB colour palettes ------------------------------------------
+        //  Bit 7 of the index register means "step to the next byte after
+        //  every write", which is how a game pushes all 64 bytes through a
+        //  one-byte window without touching the index again. The index wraps
+        //  inside the 64 bytes, and only the DATA register advances it: a
+        //  read never does.
+        case 0xFF68: bcps_ = static_cast<u8>(value & 0xBF); return;
+        case 0xFF69:
+            bg_palette_[bcps_ & 0x3F] = value;
+            if (bcps_ & 0x80) bcps_ = static_cast<u8>(0x80 | ((bcps_ + 1) & 0x3F));
+            return;
+        case 0xFF6A: ocps_ = static_cast<u8>(value & 0xBF); return;
+        case 0xFF6B:
+            obj_palette_[ocps_ & 0x3F] = value;
+            if (ocps_ & 0x80) ocps_ = static_cast<u8>(0x80 | ((ocps_ + 1) & 0x3F));
+            return;
+
+        // Object priority mode. 0 selects the CGB rule (the sprite earliest in
+        // OAM wins); 1 selects the DMG rule (the leftmost sprite wins). The
+        // boot sequence leaves it at 0 for a colour cartridge.
+        case 0xFF6C: opri_ = static_cast<u8>(value & 0x01); return;
+
         default: return;
     }
 }
@@ -201,6 +246,7 @@ void Ppu::step_dot()
             // rendering) and hand the rest of the line back as HBlank.
             render_scanline();
             enter_mode(PpuMode::HBlank);
+            hblank_entered_ = true;   // the CGB's HBlank DMA moves 16 bytes here
         }
     }
 
@@ -261,12 +307,41 @@ u32 Ppu::dmg_shade(u8 index)
     return kShades[index & 0x03];
 }
 
-void Ppu::render_background(u8 line, std::array<u8, kScreenWidth> &bg_color)
+u32 Ppu::cgb_color(u16 bgr555)
 {
-    // On a DMG, clearing bit 0 of LCDC blanks the background and the window
-    // entirely. Colour index 0 is left everywhere so sprites still show.
-    if ((lcdc_ & LcdcBgEnable) == 0) {
+    const u8 r5 = static_cast<u8>(bgr555 & 0x1F);
+    const u8 g5 = static_cast<u8>((bgr555 >> 5) & 0x1F);
+    const u8 b5 = static_cast<u8>((bgr555 >> 10) & 0x1F);
+
+    // Five bits to eight. Copying the top three bits into the bottom is what
+    // keeps 31 mapping to 255 instead of 248, so pure white stays pure white.
+    // The cgb-acid2 author documents this exact formula, which is what makes a
+    // byte-for-byte comparison with the reference image possible.
+    const u32 r = static_cast<u32>((r5 << 3) | (r5 >> 2));
+    const u32 g = static_cast<u32>((g5 << 3) | (g5 >> 2));
+    const u32 b = static_cast<u32>((b5 << 3) | (b5 >> 2));
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
+u32 Ppu::cgb_palette_color(const std::array<u8, kCgbPaletteBytes> &palette,
+                           u8 index, u8 color) const
+{
+    const std::size_t at = (static_cast<std::size_t>(index & 0x07) * 4 + (color & 0x03)) * 2;
+    return cgb_color(static_cast<u16>(palette[at] | (palette[at + 1] << 8)));
+}
+
+void Ppu::render_background(u8 line, std::array<u8, kScreenWidth> &bg_color,
+                            std::array<u8, kScreenWidth> &bg_attr)
+{
+    // Bit 0 of LCDC means two different things on the two machines, and this
+    // is one of the places where the CGB is not just "a DMG with colours":
+    //
+    //   DMG  0 = do not draw the background or the window at all.
+    //   CGB  0 = draw them, but sprites always win over them (master
+    //            priority). The background never disappears.
+    if (!cgb_ && (lcdc_ & LcdcBgEnable) == 0) {
         bg_color.fill(0);
+        bg_attr.fill(0);
         for (int x = 0; x < kScreenWidth; ++x)
             framebuffer_[static_cast<std::size_t>(line) * kScreenWidth + x] = dmg_shade(0);
         return;
@@ -298,28 +373,45 @@ void Ppu::render_background(u8 line, std::array<u8, kScreenWidth> &bg_color)
         const u16 map_addr   = static_cast<u16>(map_base + (map_y / 8) * 32 + (map_x / 8));
         const u8  tile_index = vram_byte(0, map_addr);
 
+        // The attribute byte sits at the same address in the OTHER bank. On a
+        // DMG that bank is not wired, so it is read as zero and every test
+        // below falls through to the black-and-white behaviour.
+        const u8 attr = cgb_ ? vram_byte(1, map_addr) : 0;
+
         // Two addressing modes, and getting this wrong is a classic: with
         // LCDC bit 4 clear the index is SIGNED and counted from 0x9000.
         const u16 tile_addr = (lcdc_ & LcdcTileDataArea)
             ? static_cast<u16>(0x8000 + tile_index * 16)
             : static_cast<u16>(0x9000 + static_cast<i8>(tile_index) * 16);
 
-        const u16 row  = static_cast<u16>(tile_addr + (map_y % 8) * 2);
-        const u8  low  = vram_byte(0, row);
-        const u8  high = vram_byte(0, static_cast<u16>(row + 1));
-        const int bit  = 7 - (map_x % 8);
+        // Flipping is a read-order change, not a copy: the same sixteen bytes
+        // are simply walked backwards.
+        int in_x = map_x % 8;
+        int in_y = map_y % 8;
+        if (attr & BgAttrXFlip) in_x = 7 - in_x;
+        if (attr & BgAttrYFlip) in_y = 7 - in_y;
+
+        const std::size_t bank = (attr & BgAttrBank) ? 1 : 0;
+        const u16 row  = static_cast<u16>(tile_addr + in_y * 2);
+        const u8  low  = vram_byte(bank, row);
+        const u8  high = vram_byte(bank, static_cast<u16>(row + 1));
+        const int bit  = 7 - in_x;
 
         const u8 color = static_cast<u8>((((high >> bit) & 1) << 1) | ((low >> bit) & 1));
         bg_color[static_cast<std::size_t>(x)] = color;
+        bg_attr[static_cast<std::size_t>(x)]  = attr;
+
         framebuffer_[static_cast<std::size_t>(line) * kScreenWidth + x] =
-            dmg_shade(shade_of(bgp_, color));
+            cgb_ ? cgb_palette_color(bg_palette_, static_cast<u8>(attr & BgAttrPalette), color)
+                 : dmg_shade(shade_of(bgp_, color));
     }
 
     // Only advance the window's own line counter on lines where it appeared.
     if (window_used) ++window_line_;
 }
 
-void Ppu::render_sprites(u8 line, const std::array<u8, kScreenWidth> &bg_color)
+void Ppu::render_sprites(u8 line, const std::array<u8, kScreenWidth> &bg_color,
+                         const std::array<u8, kScreenWidth> &bg_attr)
 {
     if ((lcdc_ & LcdcObjEnable) == 0) return;
 
@@ -341,22 +433,34 @@ void Ppu::render_sprites(u8 line, const std::array<u8, kScreenWidth> &bg_color)
         }
     }
 
-    // Among those ten, the one further LEFT wins. Ties go to the earlier
-    // entry in memory. Sorted so the winner is handled first.
-    for (int i = 1; i < count; ++i) {
-        Candidate key = chosen[i];
-        int j = i - 1;
-        while (j >= 0 && (chosen[j].x > key.x ||
-                          (chosen[j].x == key.x && chosen[j].oam_index > key.oam_index))) {
-            chosen[j + 1] = chosen[j];
-            --j;
+    // Which sprite wins where two overlap is decided differently on the two
+    // machines, and 0xFF6C (OPRI) selects the rule on a CGB:
+    //
+    //   DMG rule  the one further LEFT wins; ties go to the earlier OAM entry.
+    //   CGB rule  the earlier OAM entry always wins, wherever it sits.
+    //
+    // The list is already in OAM order, so the CGB rule needs no work at all.
+    const bool dmg_priority = !cgb_ || (opri_ & 0x01);
+    if (dmg_priority) {
+        for (int i = 1; i < count; ++i) {
+            Candidate key = chosen[i];
+            int j = i - 1;
+            while (j >= 0 && (chosen[j].x > key.x ||
+                              (chosen[j].x == key.x && chosen[j].oam_index > key.oam_index))) {
+                chosen[j + 1] = chosen[j];
+                --j;
+            }
+            chosen[j + 1] = key;
         }
-        chosen[j + 1] = key;
     }
 
     // Once a sprite has claimed a pixel, a lower-priority one cannot show
     // through it, even if the winner ends up hidden behind the background.
     bool claimed[kScreenWidth] = {false};
+
+    // On a CGB, LCDC bit 0 is the master priority switch: clearing it puts
+    // every sprite in front of the background whatever the attribute bits say.
+    const bool master_priority = !cgb_ || (lcdc_ & LcdcBgEnable) != 0;
 
     for (int i = 0; i < count; ++i) {
         const Candidate &s = chosen[i];
@@ -368,8 +472,11 @@ void Ppu::render_sprites(u8 line, const std::array<u8, kScreenWidth> &bg_color)
         // stacked tiles, and row 8 to 15 simply reaches into the second one.
         const u8  tile      = (height == 16) ? static_cast<u8>(s.tile & 0xFE) : s.tile;
         const u16 tile_addr = static_cast<u16>(0x8000 + tile * 16 + row * 2);
-        const u8  low       = vram_byte(0, tile_addr);
-        const u8  high      = vram_byte(0, static_cast<u16>(tile_addr + 1));
+
+        // A CGB sprite may take its pixels from either VRAM bank.
+        const std::size_t bank = (cgb_ && (s.attr & ObjAttrBank)) ? 1 : 0;
+        const u8  low       = vram_byte(bank, tile_addr);
+        const u8  high      = vram_byte(bank, static_cast<u16>(tile_addr + 1));
 
         for (int px = 0; px < 8; ++px) {
             const int screen_x = static_cast<int>(s.x) - 8 + px;   // X is offset by 8
@@ -382,13 +489,27 @@ void Ppu::render_sprites(u8 line, const std::array<u8, kScreenWidth> &bg_color)
 
             claimed[screen_x] = true;
 
-            // Attribute bit 7 puts the sprite BEHIND background colours 1 to
-            // 3, but still in front of colour 0.
-            if ((s.attr & 0x80) && bg_color[static_cast<std::size_t>(screen_x)] != 0) continue;
+            // Background colour 0 is always beaten by a sprite. For colours 1
+            // to 3 there are two veto bits, and on a CGB either one is enough:
+            //
+            //   the sprite's own bit 7   "keep me behind the background"
+            //   the tile's attribute 7   "keep sprites behind ME"
+            //
+            // and the master priority switch overrides both.
+            const std::size_t at = static_cast<std::size_t>(screen_x);
+            if (master_priority && bg_color[at] != 0 &&
+                ((s.attr & 0x80) || (cgb_ && (bg_attr[at] & BgAttrPriority)))) {
+                continue;
+            }
 
-            const u8 palette = (s.attr & 0x10) ? obp1_ : obp0_;
-            framebuffer_[static_cast<std::size_t>(line) * kScreenWidth + screen_x] =
-                dmg_shade(shade_of(palette, color));
+            u32 pixel;
+            if (cgb_) {
+                pixel = cgb_palette_color(obj_palette_,
+                                          static_cast<u8>(s.attr & ObjAttrCgbPalette), color);
+            } else {
+                pixel = dmg_shade(shade_of((s.attr & 0x10) ? obp1_ : obp0_, color));
+            }
+            framebuffer_[static_cast<std::size_t>(line) * kScreenWidth + screen_x] = pixel;
         }
     }
 }
@@ -398,8 +519,9 @@ void Ppu::render_scanline()
     if (ly_ >= kVisibleLines) return;
 
     std::array<u8, kScreenWidth> bg_color{};
-    render_background(ly_, bg_color);
-    render_sprites(ly_, bg_color);
+    std::array<u8, kScreenWidth> bg_attr{};
+    render_background(ly_, bg_color, bg_attr);
+    render_sprites(ly_, bg_color, bg_attr);
 }
 
 void Ppu::tick(u32 t_sys)
