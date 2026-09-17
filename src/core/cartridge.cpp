@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <fstream>
+#include <vector>
 
 namespace retroemu {
 namespace {
@@ -330,7 +331,7 @@ bool parse_header(const std::vector<u8> &rom, CartridgeHeader &out, std::string 
 bool Cartridge::load_from_file(const std::string &path, std::string &error)
 {
     path_ = path;
-    rom_.clear();
+    mbc_.reset();
     header_ = CartridgeHeader{};
 
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -346,38 +347,88 @@ bool Cartridge::load_from_file(const std::string &path, std::string &error)
     }
     file.seekg(0, std::ios::beg);
 
-    rom_.resize(static_cast<std::size_t>(size));
-    if (!file.read(reinterpret_cast<char *>(rom_.data()), size)) {
+    std::vector<u8> rom(static_cast<std::size_t>(size));
+    if (!file.read(reinterpret_cast<char *>(rom.data()), size)) {
         error = "cannot read '" + path + "'";
-        rom_.clear();
         return false;
     }
 
-    if (!parse_header(rom_, header_, error)) {
-        rom_.clear();
-        return false;
-    }
+    if (!parse_header(rom, header_, error)) return false;
 
-    // Allocate the external RAM announced by the header. 0xFF is what an
-    // uninitialised chip reads as; a battery save will overwrite it in step 13.
-    ram_.assign(header_.ram_size, 0xFF);
+    mbc_           = make_mbc(header_, std::move(rom));
     bank_commands_ = 0;
+
+    // A battery save, if there is one, is restored straight away: the whole
+    // point of a battery is that the game finds its data where it left it.
+    load_battery();
     return true;
 }
 
 bool Cartridge::load_from_memory(std::vector<u8> rom, const std::string &name, std::string &error)
 {
     path_   = name;
-    rom_    = std::move(rom);
+    mbc_.reset();
     header_ = CartridgeHeader{};
 
-    if (!parse_header(rom_, header_, error)) {
-        rom_.clear();
-        return false;
-    }
-    ram_.assign(header_.ram_size, 0xFF);
+    if (!parse_header(rom, header_, error)) return false;
+
+    mbc_           = make_mbc(header_, std::move(rom));
     bank_commands_ = 0;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+//  Battery-backed RAM (subject V.5, p.8)
+// ---------------------------------------------------------------------------
+//  "You must also manage the in-game backup for games that propose this
+//   feature (battery-backed cartridge RAM persisted on disk between
+//   sessions)."
+// ---------------------------------------------------------------------------
+std::string Cartridge::save_path() const
+{
+    const std::size_t slash = path_.find_last_of('/');
+    const std::size_t dot   = path_.find_last_of('.');
+
+    // Only a dot in the final component is an extension, so a directory named
+    // "my.roms" does not truncate the path.
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+        return path_.substr(0, dot) + ".sav";
+    return path_ + ".sav";
+}
+
+bool Cartridge::load_battery()
+{
+    if (!has_battery() || !mbc_) return false;
+
+    std::ifstream file(save_path(), std::ios::binary);
+    if (!file) return false;   // no save yet is not an error
+
+    std::vector<u8> &ram = mbc_->ram();
+    file.read(reinterpret_cast<char *>(ram.data()), static_cast<std::streamsize>(ram.size()));
+    return true;
+}
+
+bool Cartridge::save_battery() const
+{
+    if (!has_battery() || !mbc_) return false;
+
+    // Nothing written means nothing to save, so a cartridge that was merely
+    // looked at leaves no file behind.
+    if (!mbc_->ram_written()) return false;
+
+    std::ofstream file(save_path(), std::ios::binary | std::ios::trunc);
+    if (!file) return false;
+
+    const std::vector<u8> &ram = mbc_->ram();
+    file.write(reinterpret_cast<const char *>(ram.data()),
+               static_cast<std::streamsize>(ram.size()));
+    return file.good();
+}
+
+const std::vector<u8> &Cartridge::ram() const
+{
+    static const std::vector<u8> kEmpty;
+    return mbc_ ? mbc_->ram() : kEmpty;
 }
 
 // ---------------------------------------------------------------------------
@@ -385,32 +436,24 @@ bool Cartridge::load_from_memory(std::vector<u8> rom, const std::string &name, s
 // ---------------------------------------------------------------------------
 u8 Cartridge::read(u16 addr) const
 {
-    if (addr < 0x8000) {
-        // Flat mapping until step 13. A banked cartridge reads 0xFF past its
-        // first 32 KiB rather than running off the end of the buffer.
-        return addr < rom_.size() ? rom_[addr] : 0xFF;
-    }
-    if (addr >= 0xA000 && addr < 0xC000) {
-        const std::size_t offset = static_cast<std::size_t>(addr - 0xA000);
-        return offset < ram_.size() ? ram_[offset] : 0xFF;   // no RAM -> open bus
-    }
+    if (!mbc_) return 0xFF;
+    if (addr < 0x8000) return mbc_->read_rom(addr);
+    if (addr >= 0xA000 && addr < 0xC000) return mbc_->read_ram(addr);
     return 0xFF;
 }
 
 void Cartridge::write(u16 addr, u8 value)
 {
+    if (!mbc_) return;
+
     if (addr < 0x8000) {
-        // ROM is read-only: nothing is stored. On real hardware these bytes
-        // reach the MBC chip and mean "switch bank". Counted, not obeyed,
-        // until step 13.
+        // Nothing is stored: ROM is read-only. The bytes reach the controller
+        // inside the cartridge instead, which reads them as commands.
         ++bank_commands_;
+        mbc_->write_rom(addr, value);
         return;
     }
-    if (addr >= 0xA000 && addr < 0xC000) {
-        const std::size_t offset = static_cast<std::size_t>(addr - 0xA000);
-        if (offset < ram_.size()) ram_[offset] = value;
-        return;
-    }
+    if (addr >= 0xA000 && addr < 0xC000) mbc_->write_ram(addr, value);
 }
 
 }  // namespace retroemu

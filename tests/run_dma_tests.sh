@@ -48,12 +48,12 @@ OUT="$("$EMU" --mooneye roms/mooneye/acceptance/div_timing.gb \
                         --max-cycles 60000000 2>&1)"
 expect "all three acceptance ROMs pass together" "3 passed, 0 failed" "$OUT"
 
-# The four MBC ROMs still fail. Declared so the expectation stays explicit.
+# The four MBC ROMs joined in at step 13.
 echo
-echo "== still to come =="
+echo "== and the controllers too, since step 13 =="
 OUT="$("$EMU" --mooneye roms/mooneye/mbc1/*.gb roms/mooneye/mbc2/*.gb roms/mooneye/mbc5/*.gb \
               --max-cycles 60000000 2>&1)"
-expect "the four MBC ROMs still fail, as expected before step 13" "0 passed, 4 failed" "$OUT"
+expect "the four MBC ROMs pass" "4 passed, 0 failed" "$OUT"
 
 # --- Nothing regressed -------------------------------------------------------
 echo

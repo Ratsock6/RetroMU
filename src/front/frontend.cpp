@@ -318,6 +318,10 @@ int run_frontend(const FrontendOptions &options)
     std::string load_error;
 
     auto load_cartridge = [&](const std::string &path) {
+        // Whatever the previous cartridge wrote is committed before it is
+        // replaced, or it would be lost.
+        if (gb.save_battery()) std::printf("saved %s\n", gb.bus().cartridge().save_path().c_str());
+
         std::string error;
         if (!gb.load(path, options.force_cgb, error)) {
             load_error = error;
@@ -566,6 +570,9 @@ int run_frontend(const FrontendOptions &options)
                         static_cast<double>(gb.bus().clock().t_sys()) / kSystemClockHz);
         }
     }
+
+    if (gb.save_battery())
+        std::printf("saved %s\n", gb.bus().cartridge().save_path().c_str());
 
     ui.shutdown();
     SDL_DestroyTexture(texture);

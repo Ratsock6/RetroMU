@@ -819,3 +819,80 @@ That is what lets the test suite prove the subject's requirement rather than
 assert it: it walks the browser into a directory, back out, onto a cartridge,
 and checks the cartridge was loaded. Fifteen checks drive the interface
 exactly as a human would.
+
+---
+
+## D50 — The controller owns the ROM and the RAM
+
+**Context.** A `Cartridge` is moved into the `Bus` when it is attached. If the
+controller held references into the cartridge's buffers, the move would leave
+it pointing at freed memory.
+
+**Decision.** `Mbc` owns the ROM and the cartridge RAM outright, and
+`Cartridge` holds a `unique_ptr<Mbc>`. Moving a cartridge moves the pointer
+and the data travels with it. `Cartridge` becomes move-only, which nothing in
+the project needed it not to be.
+
+Three controllers plus one for cartridges with no chip at all, behind one
+interface, so the bus has a single path: everything in 0x0000-0x7FFF goes to
+the controller, which decides which bank each window shows.
+
+---
+
+## D51 — Bank numbers wrap rather than reading past the end
+
+**Context.** A game may select a bank that does not exist on the cartridge it
+is running from.
+
+**Decision.** The bank number is taken modulo the number of banks that exist,
+for ROM and for RAM alike. That is not a defensive check: it is what the
+hardware does, because the address lines that would carry the extra bits are
+simply not connected, so they read back as whatever the connected ones say.
+
+Getting this wrong for RAM is what made mooneye's `mbc1/ram_64kb` fail at
+round 3. With a single 8 KiB chip there are no wires for the bank bits, so
+selecting bank 1 must show bank 0 again; returning 0xFF instead looked
+plausible and was wrong.
+
+---
+
+## D52 — Each controller's quirks, kept rather than smoothed over
+
+**MBC1.** Writing 0 to the five-bit register selects bank 1, not bank 0, so
+bank 0 cannot be placed in the switchable window at all, and on a large
+cartridge banks 0x20, 0x40 and 0x60 are unreachable there too. The mode bit
+changes what the second register means, and in mode 1 it reaches the fixed
+window as well.
+
+**MBC2.** Its RAM is inside the chip: 512 half-bytes, so only the low four
+bits of each cell exist and reads return the rest as ones. The header
+announces no RAM at all. And it has no separate address range for its two
+commands: bit 8 of the ADDRESS written to decides which one is meant.
+
+**MBC5.** Nine bits of bank number across two registers, and unlike MBC1 bank
+0 can be selected: writing 0 means bank 0.
+
+Each of these looks like a bug to smooth over and is in fact what the
+cartridge does. Games depend on them.
+
+---
+
+## D53 — When to save is the caller's business
+
+**Context.** Section V.5 (p.8) requires battery-backed RAM "persisted on disk
+between sessions".
+
+**Decision.** `Cartridge::load_battery` runs automatically when a cartridge is
+loaded, because the whole point of a battery is that the game finds its data
+where it left it. `save_battery` has to be asked for: the window asks on exit
+and before loading another cartridge, the debugger on quit and on the `save`
+command.
+
+Two conditions before a file is written: the cartridge must have a battery,
+and the game must actually have written to the RAM. A cartridge that was
+merely looked at leaves nothing behind, so running the test suite does not
+litter `roms/` with save files.
+
+The save sits next to the ROM with its extension replaced, and only a dot in
+the final path component counts as an extension, so a directory named
+`my.roms` does not truncate the path.

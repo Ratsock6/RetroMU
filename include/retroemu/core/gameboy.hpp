@@ -27,6 +27,12 @@ public:
 
     void reset();
 
+    // Writes the cartridge RAM to disk when the cartridge has a battery and
+    // the game actually wrote to it. Called when the emulator is about to
+    // stop or to load something else: when to save is the caller's business,
+    // not the cartridge's.
+    bool save_battery();
+
     // Execute one instruction. Returns the T-cycles it consumed.
     u32 step();
 

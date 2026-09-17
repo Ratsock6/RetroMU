@@ -733,6 +733,130 @@ int run_cpu_selftest(bool verbose)
         check_u8("LY is read-only", b.bus().peek(0xFF44), before);
     }
 
+    // === Memory bank controllers (subject V.5) ==============================
+    //  The cartridge window is 32 KiB but a cartridge can hold 8 MiB. A chip
+    //  inside moves the window, and it is commanded by WRITING TO ROM, which
+    //  stores nothing because ROM is read-only.
+    if (verbose) std::printf("\n== memory bank controllers ==\n");
+    {
+        // A 64 KiB MBC1 cartridge: four banks, each filled with its own
+        // number so the window's position is visible at a glance.
+        auto make_banked = [](u8 type, int banks, u8 ram_code) {
+            std::vector<u8> rom(static_cast<std::size_t>(banks) * 16 * 1024, 0x00);
+            for (int bank = 0; bank < banks; ++bank)
+                for (std::size_t i = 0; i < 16 * 1024; ++i)
+                    rom[static_cast<std::size_t>(bank) * 16 * 1024 + i] = static_cast<u8>(bank);
+            rom[0x0100] = 0x00;                       // a NOP at the entry point
+            rom[0x0147] = type;
+            rom[0x0148] = static_cast<u8>(banks == 4 ? 0x01 : (banks == 16 ? 0x03 : 0x00));
+            rom[0x0149] = ram_code;
+            u8 sum = 0;
+            for (std::size_t a = 0x0134; a <= 0x014C; ++a) sum = static_cast<u8>(sum - rom[a] - 1);
+            rom[0x014D] = sum;
+            return rom;
+        };
+        auto load_into = [](Bench &b, std::vector<u8> rom) {
+            Cartridge   cart;
+            std::string error;
+            if (!cart.load_from_memory(std::move(rom), "<mbc-test>", error)) return false;
+            b.bus().attach(std::move(cart), Model::Dmg);
+            return true;
+        };
+
+        {
+            // MBC1, 4 banks of ROM, no RAM.
+            Bench b; b.load({0x00});
+            report(load_into(b, make_banked(0x01, 4, 0x00)), "an MBC1 cartridge loads", "load failed");
+
+            check_u8("bank 0 sits at 0x0000", b.bus().peek(0x0000), 0);
+            check_u8("bank 1 is in the window at boot", b.bus().peek(0x4000), 1);
+
+            b.bus().poke(0x2000, 0x02);
+            check_u8("writing 2 into ROM moves the window to bank 2", b.bus().peek(0x4000), 2);
+            check_u8("and leaves 0x0000 on bank 0", b.bus().peek(0x0000), 0);
+
+            b.bus().poke(0x2000, 0x03);
+            check_u8("bank 3", b.bus().peek(0x4000), 3);
+
+            // Writing 0 selects bank 1, not bank 0. Bank 0 simply cannot be
+            // put in the switchable window on an MBC1.
+            b.bus().poke(0x2000, 0x00);
+            check_u8("writing 0 selects bank 1, not bank 0", b.bus().peek(0x4000), 1);
+
+            // A bank beyond the cartridge wraps, because the address lines
+            // that would carry the extra bits are not connected.
+            b.bus().poke(0x2000, 0x06);
+            check_u8("a bank past the end wraps around", b.bus().peek(0x4000), 2);
+        }
+        {
+            // MBC1 with 8 KiB of RAM, which needs enabling before it answers.
+            Bench b; b.load({0x00});
+            load_into(b, make_banked(0x03, 4, 0x02));
+
+            check_u8("RAM reads 0xFF while it is disabled", b.bus().peek(0xA000), 0xFF);
+            b.bus().poke(0xA000, 0x42);
+            b.bus().poke(0x0000, 0x0A);            // the magic value that opens it
+            check_u8("a write while disabled was dropped", b.bus().peek(0xA000), 0xFF);
+
+            b.bus().poke(0xA000, 0x42);
+            check_u8("once enabled it stores", b.bus().peek(0xA000), 0x42);
+
+            b.bus().poke(0x0000, 0x00);            // close it again
+            check_u8("closing it hides the contents", b.bus().peek(0xA000), 0xFF);
+            b.bus().poke(0x0000, 0x0A);
+            check_u8("reopening finds them intact", b.bus().peek(0xA000), 0x42);
+
+            // With a single 8 KiB chip there are no wires for the bank bits,
+            // so every bank shows the same memory. Getting this wrong is what
+            // made mooneye's mbc1/ram_64kb fail at round 3.
+            b.bus().poke(0x6000, 0x01);            // advanced banking mode
+            b.bus().poke(0x4000, 0x01);            // "bank 1"
+            check_u8("a one-bank chip mirrors every bank", b.bus().peek(0xA000), 0x42);
+        }
+        {
+            // MBC2: its two commands share one address range, and bit 8 of
+            // the ADDRESS decides which is meant.
+            Bench b; b.load({0x00});
+            std::vector<u8> rom = make_banked(0x05, 4, 0x00);
+            report(load_into(b, std::move(rom)), "an MBC2 cartridge loads", "load failed");
+
+            b.bus().poke(0x2100, 0x02);            // bit 8 set: a bank command
+            check_u8("bit 8 of the address means 'switch bank'", b.bus().peek(0x4000), 2);
+
+            b.bus().poke(0x0000, 0x0A);            // bit 8 clear: a RAM command
+            b.bus().poke(0xA000, 0xAB);
+            // Only the low four bits of each cell exist; the rest read as 1.
+            check_u8("its RAM holds half-bytes", b.bus().peek(0xA000), 0xFB);
+
+            // 512 cells echoed across the whole 8 KiB window.
+            check_u8("512 cells echo through the window", b.bus().peek(0xA200), 0xFB);
+        }
+        {
+            // MBC5: nine bits of bank number across two registers, and unlike
+            // MBC1 bank 0 CAN be selected.
+            Bench b; b.load({0x00});
+            report(load_into(b, make_banked(0x19, 16, 0x00)), "an MBC5 cartridge loads", "load failed");
+
+            b.bus().poke(0x2000, 0x05);
+            check_u8("the low register selects a bank", b.bus().peek(0x4000), 5);
+
+            b.bus().poke(0x2000, 0x00);
+            check_u8("bank 0 can be selected, unlike MBC1", b.bus().peek(0x4000), 0);
+
+            b.bus().poke(0x3000, 0x01);            // the ninth bit
+            b.bus().poke(0x2000, 0x00);
+            check_u8("the ninth bit reaches bank 256, wrapped to 0", b.bus().peek(0x4000), 0);
+        }
+        {
+            // A cartridge with no controller ignores the commands entirely.
+            Bench b; b.load({0x00});
+            const u8 before = b.bus().peek(0x4000);
+            b.bus().poke(0x2000, 0x03);
+            check_u8("a cartridge with no controller ignores bank commands",
+                     b.bus().peek(0x4000), before);
+        }
+    }
+
     // === Joypad (subject V.4) ===============================================
     //  Eight buttons through one register that shows four wires at a time.
     //  The game clears a selection bit to choose which half it sees. The

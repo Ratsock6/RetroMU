@@ -43,6 +43,11 @@ void GameBoy::reset()
     cpu_.reset(model_);
 }
 
+bool GameBoy::save_battery()
+{
+    return bus_.has_cartridge() && bus_.cartridge().save_battery();
+}
+
 u32 GameBoy::step() { return cpu_.step(bus_); }
 
 void GameBoy::run_system_cycles(u64 t_sys)

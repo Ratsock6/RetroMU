@@ -105,6 +105,7 @@ void print_help()
         "  k <button> [0|1]  press or release a button; with no value, show them\n"
         "                    (up down left right a b start select)\n"
         "  i                 machine state: clocks, frames, link port\n"
+        "  save              write the battery-backed RAM to disk\n"
         "  reset             reset the machine\n"
         "  h                 this help\n"
         "  q                 quit\n");
@@ -182,7 +183,11 @@ int run_debugger(GameBoy &gb)
         const bool has1 = words.size() > 1 && parse_number(words[1], arg1);
         const bool has2 = words.size() > 2 && parse_number(words[2], arg2);
 
-        if (cmd == "q" || cmd == "quit") break;
+        if (cmd == "q" || cmd == "quit") {
+            if (gb.save_battery())
+                std::printf("  saved %s\n", gb.bus().cartridge().save_path().c_str());
+            break;
+        }
         if (cmd == "h" || cmd == "help" || cmd == "?") { print_help(); continue; }
 
         if (cmd == "r" || cmd == "regs") {
@@ -317,6 +322,16 @@ int run_debugger(GameBoy &gb)
         }
 
         if (cmd == "i" || cmd == "info") { print_state(gb); continue; }
+
+        if (cmd == "save") {
+            if (gb.save_battery())
+                std::printf("  saved %s\n", gb.bus().cartridge().save_path().c_str());
+            else if (!gb.bus().cartridge().has_battery())
+                std::printf("  this cartridge has no battery\n");
+            else
+                std::printf("  nothing written yet, nothing to save\n");
+            continue;
+        }
 
         if (cmd == "reset") {
             gb.reset();

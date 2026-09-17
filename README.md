@@ -93,7 +93,7 @@ the test bundle before moving on.
 | 10 | OAM DMA | done |
 | 11 | Real-time loop and inputs *(subject V.3, V.4)* | done |
 | 12 | GUI: load / play / pause *(subject Chapter IV)* | done |
-| 13 | MBC1, MBC2, MBC5 and battery saves *(subject V.5)* | todo |
+| 13 | MBC1, MBC2, MBC5 and battery saves *(subject V.5)* | done |
 | 14 | CGB: palettes, VRAM bank, HDMA, double speed *(subject V.6)* | todo |
 | 15 | Robustness and finalisation | todo |
 
@@ -113,6 +113,7 @@ the test bundle before moving on.
 ./tests/run_dma_tests.sh          # step 10: OAM DMA              (5 checks)
 ./tests/run_input_tests.sh        # step 11: loop and inputs      (14 checks)
 ./tests/run_gui_tests.sh          # step 12: the interface        (15 checks)
+./tests/run_mbc_tests.sh          # step 13: controllers, saves   (16 checks)
 ```
 
 `run_cartridge_tests.sh` checks the parsed summary of the nine bundled ROMs
@@ -137,6 +138,13 @@ separately:
 They report their verdict through the link port rather than the screen, which
 is what makes it possible to validate the whole instruction set before any
 rendering exists.
+
+### Saves
+
+Cartridges with a battery keep their data in a `.sav` file next to the ROM,
+written when the emulator closes or loads something else, and read back when
+the cartridge is loaded again. A cartridge the game never wrote to leaves no
+file behind.
 
 ### The interface
 
@@ -310,6 +318,7 @@ RetroEmu/
 │       ├── timer.cpp       DIV, TIMA, TMA, TAC
 │       ├── dma.cpp         the sprite table copier
 │       ├── joypad.cpp      the eight buttons (subject V.4)
+│       ├── mbc.cpp         bank controllers (subject V.5)
 │       ├── cpu.cpp         the instruction set
 │       └── gameboy.cpp     the assembled machine
 │   └── debug/              debugger-side tooling

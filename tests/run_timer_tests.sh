@@ -53,9 +53,12 @@ echo
 echo "== the verdict protocol =="
 expect "a passing ROM is recognised"  "PASS" \
        "$("$EMU" --mooneye roms/mooneye/acceptance/div_timing.gb --max-cycles 60000000 2>&1)"
-# An MBC test is used here: those genuinely fail until step 13.
-expect "a failing ROM is recognised"  "the ROM reported a failure" \
-       "$("$EMU" --mooneye roms/mooneye/mbc5/rom_2Mb.gb --max-cycles 60000000 2>&1)"
+# Since step 13 no ROM of the bundle reports an explicit failure any more, so
+# the branch checked here is the other one: a ROM that reaches the marker with
+# registers that are not the expected sequence. The acid2 ROMs do exactly
+# that, because they use LD B,B for their own purposes.
+expect "unexpected registers are reported"  "expected 3 5 8 13 21 34" \
+       "$("$EMU" --mooneye roms/acid2/dmg-acid2.gb --max-cycles 30000000 2>&1)"
 # A tiny cycle budget guarantees the marker is never reached. dmg-acid2 is not
 # used here: it contains an LD B,B of its own, which it uses to tell a debugger
 # the screen is ready to be compared.

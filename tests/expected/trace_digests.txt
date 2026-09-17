@@ -4,6 +4,6 @@ DB43CE3A8CD74CA6  roms/mooneye/acceptance/div_timing.gb
 1EF042D9CBA78FFD  roms/mooneye/acceptance/intr_timing.gb
 5946F2D51D4B1A42  roms/mooneye/acceptance/oam_dma/basic.gb
 754206648F2AAC6E  roms/mooneye/mbc1/ram_64kb.gb
-72309AE873E92E96  roms/mooneye/mbc1/rom_512kb.gb
-5D8DBC5C363C8AA4  roms/mooneye/mbc2/ram.gb
-63E90C300385DDAF  roms/mooneye/mbc5/rom_2Mb.gb
+FFAC4754EA40C693  roms/mooneye/mbc1/rom_512kb.gb
+BFA0609E872A5696  roms/mooneye/mbc2/ram.gb
+8A5810686B35D18A  roms/mooneye/mbc5/rom_2Mb.gb

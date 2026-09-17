@@ -14,8 +14,11 @@
 //  the MBC implementations in step 13.
 // ===========================================================================
 
+#include <memory>
 #include <string>
 #include <vector>
+
+#include "retroemu/core/mbc.hpp"
 
 #include "retroemu/core/types.hpp"
 
@@ -123,33 +126,43 @@ public:
     bool load_from_memory(std::vector<u8> rom, const std::string &name, std::string &error);
 
     // --- Access from the bus ------------------------------------------------
-    //  Handles 0x0000-0x7FFF (ROM) and 0xA000-0xBFFF (external RAM).
-    //
-    //  STEP 3 SCOPE: the ROM window is mapped flat, so only the first 32 KiB
-    //  of a banked cartridge is reachable and writes into the ROM range are
-    //  dropped. Step 13 replaces this with the real MBC1/MBC2/MBC5 logic
-    //  required by section V.5 of the subject.
+    //  0x0000-0x7FFF goes to the controller, which decides which bank each
+    //  window shows. 0xA000-0xBFFF is the cartridge's own RAM.
     u8   read(u16 addr) const;
     void write(u16 addr, u8 value);
 
-    // True once a write into the ROM range has been seen: on real hardware
-    // that is a bank-switch command. Useful before step 13 to show that such
-    // commands are being issued and are currently ignored.
+    // How many bank-switch commands the controller has received.
     u64 bank_commands_seen() const { return bank_commands_; }
 
-    const std::vector<u8> &ram() const { return ram_; }
+    const Mbc *mbc() const { return mbc_.get(); }
 
-    bool                    loaded() const { return !rom_.empty(); }
+    // --- Battery-backed RAM (subject V.5, p.8) ------------------------------
+    //  "You must also manage the in-game backup for games that propose this
+    //   feature (battery-backed cartridge RAM persisted on disk between
+    //   sessions)."
+    bool has_battery() const { return header_.has_battery && header_.ram_size > 0; }
+
+    // Where the save lives: the cartridge's path with its extension replaced.
+    std::string save_path() const;
+
+    // Both are silent no-ops for a cartridge with no battery. load_battery is
+    // called automatically when a cartridge is loaded; save_battery has to be
+    // asked for, because when to write is the caller's business.
+    bool load_battery();
+    bool save_battery() const;
+
+    std::size_t rom_size() const { return mbc_ ? mbc_->rom_size() : 0; }
+    const std::vector<u8> &ram() const;
+
+    bool                    loaded() const { return mbc_ != nullptr; }
     const std::string      &path()   const { return path_; }
-    const std::vector<u8>  &rom()    const { return rom_; }
     const CartridgeHeader  &header() const { return header_; }
 
 private:
-    std::string       path_;
-    std::vector<u8>   rom_;
-    std::vector<u8>   ram_;            // external RAM, sized from the header
-    CartridgeHeader   header_;
-    u64               bank_commands_ = 0;
+    std::string          path_;
+    std::unique_ptr<Mbc> mbc_;         // owns the ROM and the cartridge RAM
+    CartridgeHeader      header_;
+    u64                  bank_commands_ = 0;
 };
 
 }  // namespace retroemu

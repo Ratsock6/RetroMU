@@ -197,7 +197,7 @@ void print_cartridge_info(const retroemu::Cartridge &cart)
 
     std::printf("File            : %s\n", cart.path().c_str());
     std::printf("File size       : %zu bytes (%s)\n",
-                cart.rom().size(), human_size(cart.rom().size()).c_str());
+                cart.rom_size(), human_size(cart.rom_size()).c_str());
     std::printf("\n");
 
     std::printf("Title           : %s\n", h.title.empty() ? "(none)" : h.title.c_str());
