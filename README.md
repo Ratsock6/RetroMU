@@ -88,7 +88,7 @@ the test bundle before moving on.
 | 7 | Interrupts and timer | done |
 | 8 | PPU: state machine | done |
 | 9 | PPU: background, window, sprites, palettes *(subject V.2)* | done |
-| 10 | OAM DMA | todo |
+| 10 | OAM DMA | done |
 | 11 | Real-time loop and inputs *(subject V.3, V.4)* | todo |
 | 12 | GUI: load / play / pause *(subject Chapter IV)* | todo |
 | 13 | MBC1, MBC2, MBC5 and battery saves *(subject V.5)* | todo |
@@ -108,6 +108,7 @@ the test bundle before moving on.
 ./tests/run_timer_tests.sh        # step 7: interrupts and timer   (8 checks)
 ./tests/run_ppu_tests.sh          # step 8: PPU state machine     (11 checks)
 ./tests/run_render_tests.sh       # step 9: rendering             (9 checks)
+./tests/run_dma_tests.sh          # step 10: OAM DMA              (5 checks)
 ```
 
 `run_cartridge_tests.sh` checks the parsed summary of the nine bundled ROMs
@@ -261,6 +262,7 @@ RetroEmu/
 │       ├── bus.cpp         address dispatch and the master clock
 │       ├── ppu.cpp         owns VRAM and OAM (rendering from step 9)
 │       ├── timer.cpp       DIV, TIMA, TMA, TAC
+│       ├── dma.cpp         the sprite table copier
 │       ├── cpu.cpp         the instruction set
 │       └── gameboy.cpp     the assembled machine
 │   └── debug/              debugger-side tooling

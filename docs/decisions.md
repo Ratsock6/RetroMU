@@ -635,3 +635,50 @@ A side benefit: the mooneye ROMs print their results on screen, so their
 messages are now readable. `rom_2Mb` shows "TEST FAILED / BANK NUMBER /
 EXPECTED / ACTUAL", which will make step 13 far easier to debug than a bare
 pass or fail.
+
+---
+
+## D39 — The copier reads through peek and poke, never read and write
+
+**Context.** `Bus::tick` drives the OAM copier, and the copier moves a byte by
+reading from memory and writing into the sprite table.
+
+**Decision.** It uses `peek` and `poke`. Using `read` and `write` would charge
+the clock four more cycles for an access the very tick already accounted for,
+and the copier would drive itself: each byte would advance the clock, which
+would tick the copier, which would move another byte.
+
+The same reasoning as decision D15, arriving from the opposite direction: peek
+exists because inspecting must not perturb, and here because a component the
+clock drives must not drive the clock back.
+
+---
+
+## D40 — The bus block applies to the CPU only
+
+**Context.** While the copier runs it owns the bus, and on real hardware the
+CPU can only reach HRAM. That is why games copy their DMA routine into HRAM
+and run it from there: anywhere else their own instruction fetches would be
+blocked.
+
+**Decision.** The restriction lives in `Bus::read` and `Bus::write`, the two
+accessors the CPU uses, and not in `dispatch_read` / `dispatch_write`. So
+`peek` and `poke` stay clear of it, which is what lets the copier move its own
+bytes and the debugger and tracer look at memory while a transfer is running.
+
+Implementing the block was a judgement call, since no bundle ROM demands it
+and being permissive can only help a well-behaved game. It was kept because
+it costs one predicate, it is what the hardware does, and it was verified not
+to change anything: all three acceptance ROMs still pass and dmg-acid2 still
+matches its reference pixel for pixel with the block in place.
+
+---
+
+## D41 — The copier follows the CPU clock
+
+**Context.** The copier moves one byte per machine cycle.
+
+**Decision.** `Bus::tick` feeds it CPU-domain cycles, like the timer and
+unlike the PPU (D28). In CGB double-speed mode the machine cycles are shorter,
+so the transfer finishes in half the real time, which is what the hardware
+does.

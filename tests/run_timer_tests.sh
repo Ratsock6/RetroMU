@@ -48,21 +48,14 @@ OUT="$("$EMU" --mooneye roms/mooneye/acceptance/div_timing.gb \
 expect "div_timing passes"  "PASS  roms/mooneye/acceptance/div_timing.gb"  "$OUT"
 expect "intr_timing passes" "PASS  roms/mooneye/acceptance/intr_timing.gb" "$OUT"
 
-# oam_dma/basic needs the DMA engine, which is step 10. Declared here so the
-# expectation stays explicit.
-echo
-echo "== not yet implemented =="
-OUT="$("$EMU" --mooneye roms/mooneye/acceptance/oam_dma/basic.gb --max-cycles 60000000 2>&1)"
-expect "oam_dma/basic still fails, as expected before step 10" \
-       "FAIL  roms/mooneye/acceptance/oam_dma/basic.gb" "$OUT"
-
 # --- The mooneye protocol itself --------------------------------------------
 echo
 echo "== the verdict protocol =="
 expect "a passing ROM is recognised"  "PASS" \
        "$("$EMU" --mooneye roms/mooneye/acceptance/div_timing.gb --max-cycles 60000000 2>&1)"
+# An MBC test is used here: those genuinely fail until step 13.
 expect "a failing ROM is recognised"  "the ROM reported a failure" \
-       "$("$EMU" --mooneye roms/mooneye/acceptance/oam_dma/basic.gb --max-cycles 60000000 2>&1)"
+       "$("$EMU" --mooneye roms/mooneye/mbc5/rom_2Mb.gb --max-cycles 60000000 2>&1)"
 # A tiny cycle budget guarantees the marker is never reached. dmg-acid2 is not
 # used here: it contains an LD B,B of its own, which it uses to tell a debugger
 # the screen is ready to be compared.

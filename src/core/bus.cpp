@@ -54,6 +54,7 @@ void Bus::reset()
 {
     ppu_.reset(model_);
     timer_.reset(model_);
+    dma_.reset();
     clock_.reset();
     wram_.fill(0);
     hram_.fill(0);
@@ -83,10 +84,26 @@ std::size_t Bus::wram_bank() const
 //  The clock advances BEFORE the access resolves, which is what makes the
 //  timer and the PPU see the access at the right moment (decision D8).
 // ---------------------------------------------------------------------------
+// While the sprite copier is running it owns the bus, and the CPU can only
+// reach HRAM. That is why games copy their DMA routine into HRAM and run it
+// from there: anywhere else, their own instruction fetches would be blocked.
+//
+// The restriction applies to read() and write() only, never to peek() and
+// poke(). Those are how the copier itself moves bytes, and how the debugger
+// and the tracer look at memory, none of which the hardware bus arbitration
+// concerns.
+bool Bus::cpu_blocked_by_dma(u16 addr) const
+{
+    if (!dma_.active()) return false;
+    const bool in_hram = (addr >= 0xFF80 && addr <= 0xFFFE);
+    return !in_hram;
+}
+
 u8 Bus::read(u16 addr)
 {
     tick(kTCyclesPerMCycle);
     ++access_count_;
+    if (cpu_blocked_by_dma(addr)) return 0xFF;
     return dispatch_read(addr);
 }
 
@@ -94,6 +111,7 @@ void Bus::write(u16 addr, u8 value)
 {
     tick(kTCyclesPerMCycle);
     ++access_count_;
+    if (cpu_blocked_by_dma(addr)) return;
     dispatch_write(addr, value);
 }
 
@@ -115,7 +133,10 @@ void Bus::tick(u32 t)
     if (ppu_.take_vblank_irq()) request_interrupt(IntVBlank);
     if (ppu_.take_stat_irq())   request_interrupt(IntStat);
     if (timer_.tick(t))         request_interrupt(IntTimer);
-    // Step 10 adds dma_.tick(t_sys) here.
+
+    // The copier moves one byte per machine cycle of the CPU clock, so it too
+    // runs twice as fast in CGB double-speed mode.
+    dma_.tick(*this, t);
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +178,8 @@ u8 Bus::dispatch_read(u16 addr) const
             // PPU answers first and the stub becomes dead code.
             if (addr == 0xFF44 && ly_stub_) return 0x90;   // see Bus::set_ly_stub
             if (addr >= 0xFF04 && addr <= 0xFF07) return timer_.read(addr);
-            if (addr >= 0xFF40 && addr <= 0xFF4B && addr != 0xFF46) return ppu_.read(addr);
+            if (addr == kOamDmaRegister) return dma_.source_page();
+            if (addr >= 0xFF40 && addr <= 0xFF4B) return ppu_.read(addr);
             if (addr == 0xFF0F) return static_cast<u8>(0xE0 | io_[0x0F]);
             if (addr == 0xFF4F && model_ == Model::Cgb) return ppu_.vram_bank_register();
             if (addr == 0xFF70 && model_ == Model::Cgb) return svbk_;
@@ -214,7 +236,8 @@ void Bus::dispatch_write(u16 addr, u8 value)
 
         case MemRegion::IoRegisters:
             if (addr >= 0xFF04 && addr <= 0xFF07) { timer_.write(addr, value); return; }
-            if (addr >= 0xFF40 && addr <= 0xFF4B && addr != 0xFF46) { ppu_.write(addr, value); return; }
+            if (addr == kOamDmaRegister) { dma_.start(value); return; }
+            if (addr >= 0xFF40 && addr <= 0xFF4B) { ppu_.write(addr, value); return; }
             if (addr == 0xFF01) { io_[0x01] = value; return; }        // SB: byte to send
             if (addr == 0xFF02) {                                       // SC: control
                 io_[0x02] = value;

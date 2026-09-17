@@ -731,6 +731,82 @@ int run_cpu_selftest(bool verbose)
         check_u8("LY is read-only", b.bus().peek(0xFF44), before);
     }
 
+    // === OAM DMA ============================================================
+    //  Writing one byte to 0xFF46 starts a 160-byte copy into the sprite
+    //  table that runs on its own, one byte per machine cycle.
+    if (verbose) std::printf("\n== OAM DMA ==\n");
+    {
+        Bench b; b.load({0x00});
+        // Fill the source page with a recognisable pattern.
+        for (int i = 0; i < 160; ++i)
+            b.bus().poke(static_cast<u16>(0xC000 + i), static_cast<u8>(0xA0 + i));
+        for (int i = 0; i < 160; ++i) b.bus().poke(static_cast<u16>(0xFE00 + i), 0x00);
+
+        b.bus().poke(0xFF46, 0xC0);     // copy from 0xC000
+        report(b.bus().dma().active(), "writing 0xFF46 starts a transfer",
+               "nothing started");
+
+        b.bus().tick(160 * 4 + 4);      // 160 machine cycles, plus the startup one
+        report(!b.bus().dma().active(), "it finishes after 160 machine cycles",
+               "the transfer was still running");
+
+        bool ok = true;
+        for (int i = 0; i < 160; ++i)
+            if (b.bus().peek(static_cast<u16>(0xFE00 + i)) != static_cast<u8>(0xA0 + i)) ok = false;
+        report(ok, "all 160 bytes land in the sprite table",
+               "the copied data does not match the source");
+    }
+    {
+        // The register reads back the page that was written.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF46, 0xC0);
+        check_u8("0xFF46 reads back the source page", b.bus().peek(0xFF46), 0xC0);
+    }
+    {
+        // Halfway through, only half the bytes have moved.
+        Bench b; b.load({0x00});
+        for (int i = 0; i < 160; ++i)
+            b.bus().poke(static_cast<u16>(0xC000 + i), 0x5A);
+        for (int i = 0; i < 160; ++i) b.bus().poke(static_cast<u16>(0xFE00 + i), 0x00);
+
+        b.bus().poke(0xFF46, 0xC0);
+        b.bus().tick(4 + 80 * 4);        // startup plus eighty bytes
+        report(b.bus().dma().active(), "the transfer is still running halfway",
+               "it finished too early");
+        report(b.bus().peek(0xFE00) == 0x5A && b.bus().peek(0xFE9F) == 0x00,
+               "it copies in order, from the start",
+               "the bytes did not arrive in order");
+    }
+    {
+        // While it runs, the CPU can only reach HRAM. This is why games copy
+        // their DMA routine into HRAM and run it from there.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xC500, 0x42);      // work RAM
+        b.bus().poke(0xFF80, 0x37);      // HRAM
+        b.bus().poke(0xFF46, 0xC0);      // start a transfer
+
+        check_u8("during a transfer, work RAM reads 0xFF", b.bus().read(0xC500), 0xFF);
+        check_u8("but HRAM still reads normally", b.bus().read(0xFF80), 0x37);
+
+        b.bus().tick(160 * 4 + 8);
+        check_u8("once it is over, work RAM reads normally again",
+                 b.bus().read(0xC500), 0x42);
+    }
+    {
+        // A second write restarts the copy from the beginning.
+        Bench b; b.load({0x00});
+        for (int i = 0; i < 160; ++i) b.bus().poke(static_cast<u16>(0xC000 + i), 0x11);
+        for (int i = 0; i < 160; ++i) b.bus().poke(static_cast<u16>(0xD000 + i), 0x22);
+
+        b.bus().poke(0xFF46, 0xC0);
+        b.bus().tick(4 + 40 * 4);        // partway through
+        b.bus().poke(0xFF46, 0xD0);      // restart from another page
+        b.bus().tick(160 * 4 + 8);
+        report(b.bus().peek(0xFE00) == 0x22 && b.bus().peek(0xFE9F) == 0x22,
+               "a second write restarts the copy from the beginning",
+               "the restart did not take effect over the whole table");
+    }
+
     // === Rendering ==========================================================
     //  The console stores building blocks and a plan, never a picture. These
     //  checks drive one tile through the whole chain and then exercise the
