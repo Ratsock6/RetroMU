@@ -320,3 +320,61 @@ none is required.
 emulator exposes. That is enough for blargg's ROMs to report their results,
 which is how the entire instruction set was validated before any rendering
 existed. No cable is simulated and no partner console is modelled.
+
+---
+
+## D21 — The disassembler shares the CPU's decoding shape
+
+**Context.** Section V.1 (p.7) requires the debugger to display the next
+instruction, which means a second decoder alongside the CPU's.
+
+**Decision.** It extracts the same bit fields as the CPU (`x`, `y`, `z`, `p`,
+`q`, decision D17) and indexes the same operand tables. The two stay
+structurally parallel, so a change to one is visibly a change to the other.
+
+It reads memory exclusively through `Bus::peek`, never `Bus::read`, so
+disassembling costs no cycles and has no side effect (D15). The self-test
+verifies that by disassembling 500 times and checking the clock did not move.
+
+**Validation.** A disassembler is only trustworthy if its idea of an
+instruction's length matches what the CPU consumes: one byte of disagreement
+makes every following line of a listing wrong. Two checks:
+
+- exhaustive, in `--cpucheck`: all 497 opcodes that advance sequentially
+  (241 base plus 256 behind the CB prefix) are run and their length compared
+  with PC's advance. Conditional branches are set up so they fall through.
+  The fourteen unconditional jumps are checked by where they land or by the
+  return address they push.
+- empirical, in `--discheck`: real ROMs are executed and the same comparison
+  is made on every non-branching instruction. Across the bundle plus blargg's
+  suite, that is 52 million instruction lengths, covering 243 of the 256 base
+  opcodes and all 256 CB ones. The thirteen never seen are the illegal
+  opcodes, which no real ROM executes.
+
+---
+
+## D22 — "Run one frame" is defined in system cycles
+
+**Context.** Section V.2 (p.7) asks the debugger to run "a single frame and/or
+one second of emulation". The PPU does not exist yet (step 8), so there is no
+VBlank signal to stop on.
+
+**Decision.** A frame is 70224 system-domain cycles and a second is 4194304 of
+them. Counting in the system domain rather than the CPU one means a frame
+still lasts a frame in CGB double-speed mode. Step 8 will redefine it as "run
+until the PPU signals VBlank"; the command and its meaning do not change.
+
+Note the command reports slightly more than 70224 cycles, since emulation can
+only stop on an instruction boundary.
+
+---
+
+## D23 — A GameBoy facade assembles the machine
+
+**Context.** The frontend, the debugger and the headless runner all need a
+Bus and a Cpu wired together and reset consistently.
+
+**Decision.** `GameBoy` owns both and exposes `load`, `reset`, `step`,
+`run_frame` and `run_seconds`. The wiring exists once. It is also where the
+DMG/CGB choice is made, which is the hook the "forcing DMG/CGB" bonus
+(Ch. VI, p.9) will need.

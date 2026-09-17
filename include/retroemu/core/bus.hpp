@@ -94,6 +94,11 @@ public:
     // --- Inspection: no clock advance, no side effect ----------------------
     u8 peek(u16 addr) const;
 
+    // Debugger-side write. Same dispatch as write(), but the clock does not
+    // advance, so poking a value while single-stepping does not consume time
+    // the emulated program never spent.
+    void poke(u16 addr, u8 value) { dispatch_write(addr, value); }
+
     // --- Clock -------------------------------------------------------------
     // `t` is in the CPU domain; components are fed from the domain they
     // belong to (see clock.hpp).

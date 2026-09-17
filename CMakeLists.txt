@@ -50,6 +50,9 @@ add_executable(retroemu
     src/core/bus.cpp
     src/core/cpu.cpp
     src/debug/cpu_selftest.cpp
+    src/debug/disassembler.cpp
+    src/debug/debugger.cpp
+    src/core/gameboy.cpp
     src/core/ppu.cpp
 )
 

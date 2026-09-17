@@ -24,7 +24,10 @@
 #include "retroemu/core/bus.hpp"
 #include "retroemu/core/cartridge.hpp"
 #include "retroemu/core/cpu.hpp"
+#include "retroemu/core/gameboy.hpp"
 #include "retroemu/debug/cpu_selftest.hpp"
+#include "retroemu/debug/debugger.hpp"
+#include "retroemu/debug/disassembler.hpp"
 #include "retroemu/core/types.hpp"
 
 namespace {
@@ -596,6 +599,97 @@ int run_rom(const char *rom_path, bool force_cgb, retroemu::u64 max_cycles, bool
     return 3;   // no verdict: the ROM never finished
 }
 
+// ---------------------------------------------------------------------------
+//  Cross-check the disassembler against the CPU (step 5).
+// ---------------------------------------------------------------------------
+//  A disassembler can only be trusted if its idea of how long an instruction
+//  is matches what the CPU actually consumes. So: run a real ROM, and before
+//  every instruction record PC and the length the disassembler reports. After
+//  the step, for anything that is not a jump, PC must have advanced by exactly
+//  that many bytes.
+//
+//  Millions of instructions from a test ROM cover most of the opcode map, and
+//  any disagreement between the two decoders shows up immediately.
+// ---------------------------------------------------------------------------
+bool is_control_flow(retroemu::u8 opcode)
+{
+    switch (opcode) {
+        case 0x18: case 0x20: case 0x28: case 0x30: case 0x38:            // JR
+        case 0xC3: case 0xC2: case 0xCA: case 0xD2: case 0xDA:            // JP
+        case 0xE9:                                                        // JP HL
+        case 0xCD: case 0xC4: case 0xCC: case 0xD4: case 0xDC:            // CALL
+        case 0xC9: case 0xD9: case 0xC0: case 0xC8: case 0xD0: case 0xD8: // RET
+        case 0xC7: case 0xCF: case 0xD7: case 0xDF:                       // RST
+        case 0xE7: case 0xEF: case 0xF7: case 0xFF:
+        case 0x76: case 0x10:                                             // HALT, STOP
+            return true;
+        default:
+            return false;
+    }
+}
+
+int run_discheck(const std::vector<std::string> &roms, bool force_cgb, retroemu::u64 max_cycles)
+{
+    bool seen[256]    = {false};
+    bool seen_cb[256] = {false};
+    retroemu::u64 checked = 0;
+    int mismatches = 0;
+
+  for (const std::string &rom_path : roms) {
+    retroemu::GameBoy gb;
+    std::string error;
+    if (!gb.load(rom_path, force_cgb, error)) {
+        std::fprintf(stderr, "%s: %s\n", rom_path.c_str(), error.c_str());
+        return 1;
+    }
+
+    while (gb.bus().clock().t_cpu() < max_cycles && mismatches < 10) {
+        const retroemu::u16 pc     = gb.cpu().regs().pc;
+        const retroemu::u8  opcode = gb.bus().peek(pc);
+        const auto          ins    = retroemu::disassemble(gb.bus(), pc);
+
+        seen[opcode] = true;
+        if (opcode == 0xCB) seen_cb[gb.bus().peek(static_cast<retroemu::u16>(pc + 1))] = true;
+
+        // An interrupt is serviced before the opcode at PC is even fetched,
+        // so those steps say nothing about instruction length.
+        const bool irq_coming =
+            gb.cpu().ime() &&
+            (gb.bus().interrupt_enable() & gb.bus().interrupt_flags() & 0x1F) != 0;
+        const bool skip = irq_coming || gb.cpu().halted() || is_control_flow(opcode);
+
+        gb.step();
+        if (gb.cpu().illegal()) break;
+        if (skip) continue;
+
+        ++checked;
+        const retroemu::u16 expected = static_cast<retroemu::u16>(pc + ins.length);
+        if (gb.cpu().regs().pc != expected) {
+            std::printf("  MISMATCH at $%04X  %-9s %-18s  "
+                        "disassembler says %u byte(s), CPU advanced to $%04X\n",
+                        pc, ins.hex().c_str(), ins.text.c_str(),
+                        ins.length, gb.cpu().regs().pc);
+            ++mismatches;
+        }
+    }
+
+  }
+
+    int opcodes = 0, cb_opcodes = 0;
+    for (int i = 0; i < 256; ++i) { if (seen[i]) ++opcodes; if (seen_cb[i]) ++cb_opcodes; }
+
+    std::printf("  ROMs run        : %zu\n", roms.size());
+    std::printf("  lengths checked : %llu\n", static_cast<unsigned long long>(checked));
+    std::printf("  opcodes covered : %d base, %d behind the CB prefix\n", opcodes, cb_opcodes);
+
+    if (mismatches == 0) {
+        std::printf("  \033[1;32mthe disassembler agrees with the CPU everywhere\033[0m\n");
+        return 0;
+    }
+    std::printf("  \033[1;31m%d mismatch(es)\033[0m\n", mismatches);
+    return 1;
+}
+
 void print_usage(const char *prog)
 {
     std::printf(
@@ -611,6 +705,8 @@ void print_usage(const char *prog)
         "  --max-cycles N         cycle budget for --run (default 250000000)\n"
         "  --quiet                with --run, print only the serial output\n"
         "  --cpucheck             run the built-in CPU self-test\n"
+        "  --debug <rom>          open the interactive debugger\n"
+        "  --discheck <rom>...    cross-check the disassembler against the CPU\n"
         "  --cgb                  force CGB mode (used with --memtest)\n"
         "  --selftest [file.ppm]  check the graphics pipeline without a window\n"
         "  --scale N              window magnification factor (default: 4)\n"
@@ -662,7 +758,8 @@ int main(int argc, char *argv[])
         }
 
         if (arg == "--selftest" || arg == "--info" || arg == "--list" ||
-            arg == "--memtest"  || arg == "--run"  || arg == "--cpucheck") {
+            arg == "--memtest"  || arg == "--run"  || arg == "--cpucheck" ||
+            arg == "--debug"    || arg == "--discheck") {
             if (!action.empty()) {
                 std::fprintf(stderr, "%s and %s cannot be combined\n",
                              action.c_str(), arg.c_str());
@@ -691,6 +788,16 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "%s expects a ROM file\n", action.c_str());
         return 1;
     }
-    if (action == "--memtest") return run_memtest(files[0].c_str(), force_cgb);
+    if (action == "--memtest")  return run_memtest(files[0].c_str(), force_cgb);
+    if (action == "--discheck") return run_discheck(files, force_cgb, max_cycles);
+    if (action == "--debug") {
+        retroemu::GameBoy gb;
+        std::string error;
+        if (!gb.load(files[0], force_cgb, error)) {
+            std::fprintf(stderr, "%s: %s\n", files[0].c_str(), error.c_str());
+            return 1;
+        }
+        return retroemu::run_debugger(gb);
+    }
     return run_rom(files[0].c_str(), force_cgb, max_cycles, !quiet);
 }

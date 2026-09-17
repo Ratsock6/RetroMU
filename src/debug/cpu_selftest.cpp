@@ -7,6 +7,7 @@
 #include "retroemu/core/bus.hpp"
 #include "retroemu/core/cartridge.hpp"
 #include "retroemu/core/cpu.hpp"
+#include "retroemu/debug/disassembler.hpp"
 
 namespace retroemu {
 namespace {
@@ -150,6 +151,13 @@ void check_flags(const char *name, u8 got, const char *want_text)
     char detail[128];
     std::snprintf(detail, sizeof(detail), "flags %s, expected %s",
                   flags_to_text(got).c_str(), flags_to_text(want).c_str());
+    report(got == want, name, detail);
+}
+
+void check_text(const char *name, const std::string &got, const char *want)
+{
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "got \"%s\", expected \"%s\"", got.c_str(), want);
     report(got == want, name, detail);
 }
 
@@ -456,6 +464,173 @@ int run_cpu_selftest(bool verbose)
         b.step();
         report(!b.cpu().halted(), "HALT does not stop when an interrupt is already pending",
                "the CPU halted anyway");
+    }
+
+    // === The disassembler must agree with the CPU on every opcode ==========
+    //  Section V.1 of the subject requires the debugger to display the next
+    //  instruction. That display is only trustworthy if the disassembler's
+    //  idea of an instruction's length matches what the CPU consumes: one
+    //  byte of disagreement and every following line of a listing is wrong.
+    //
+    //  Every opcode is run on a fresh bench and PC's advance is compared with
+    //  the reported length. Conditional branches are set up so the branch is
+    //  NOT taken, which makes them advance sequentially like everything else.
+    if (verbose) std::printf("\n== disassembler vs CPU, all 512 opcodes ==\n");
+    {
+        // The unconditional jumps never advance sequentially, so they are
+        // checked separately just below.
+        auto is_unconditional_jump = [](u8 op) {
+            switch (op) {
+                case 0x18: case 0xC3: case 0xC9: case 0xCD: case 0xD9: case 0xE9:
+                case 0xC7: case 0xCF: case 0xD7: case 0xDF:
+                case 0xE7: case 0xEF: case 0xF7: case 0xFF:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+
+        // Flags that make a conditional branch fall through: NZ and NC need
+        // their flag set, Z and C need it clear.
+        auto flags_that_avoid_the_branch = [](u8 op) -> u8 {
+            const bool conditional = (op & 0xC7) == 0x20 ||   // JR cc
+                                     (op & 0xC7) == 0xC0 ||   // RET cc
+                                     (op & 0xC7) == 0xC2 ||   // JP cc
+                                     (op & 0xC7) == 0xC4;     // CALL cc
+            if (!conditional) return 0;
+            const int cc = (op >> 3) & 0x03;
+            return (cc == 0 || cc == 2) ? static_cast<u8>(FlagZ | FlagC) : 0;
+        };
+
+        int mismatches = 0;
+        int covered    = 0;
+
+        for (int prefixed = 0; prefixed < 2; ++prefixed) {
+            for (int op = 0; op < 256; ++op) {
+                const u8 opcode = static_cast<u8>(op);
+                if (!prefixed && is_unconditional_jump(opcode)) continue;
+                if (!prefixed && opcode == 0xCB) continue;   // covered by the CB pass
+
+                Bench b;
+                const std::vector<u8> code =
+                    prefixed ? std::vector<u8>{0xCB, opcode, 0x00, 0x00}
+                             : std::vector<u8>{opcode, 0x00, 0x00, 0x00};
+                if (!b.load(code)) continue;
+
+                b.cpu().regs().set_hl(0xC000);   // keep (HL) on writable memory
+                b.cpu().regs().sp = 0xC100;
+                b.cpu().regs().f  = flags_that_avoid_the_branch(opcode);
+
+                const u16 pc_before = b.cpu().regs().pc;
+                const Instruction ins = disassemble(b.bus(), pc_before);
+                b.step();
+                ++covered;
+
+                const u16 expected = static_cast<u16>(pc_before + ins.length);
+                if (b.cpu().regs().pc != expected && mismatches < 8) {
+                    char detail[192];
+                    std::snprintf(detail, sizeof(detail),
+                                  "%s$%02X \"%s\": disassembler says %u byte(s), "
+                                  "PC went from $%04X to $%04X",
+                                  prefixed ? "CB " : "", opcode, ins.text.c_str(),
+                                  ins.length, pc_before, b.cpu().regs().pc);
+                    report(false, "opcode length", detail);
+                    ++mismatches;
+                }
+            }
+        }
+
+        char detail[96];
+        std::snprintf(detail, sizeof(detail), "%d mismatch(es) over %d opcodes",
+                      mismatches, covered);
+        report(mismatches == 0, "497 sequential opcodes have the right length", detail);
+    }
+
+    // What the disassembler actually prints. Length alone is not enough: the
+    // debugger's listing is what a human reads while hunting a bug, so the
+    // operand formatting has to be right too.
+    if (verbose) std::printf("\n== disassembler output ==\n");
+    {
+        struct TextCase { std::vector<u8> code; const char *expected; };
+        const TextCase text_cases[] = {
+            {{0x00},                   "NOP"},
+            {{0x42},                   "LD B, D"},
+            {{0x76},                   "HALT"},
+            {{0xC9},                   "RET"},
+            {{0x3E, 0x42},             "LD A, $42"},
+            {{0x01, 0x34, 0x12},       "LD BC, $1234"},
+            {{0xC3, 0x50, 0x01},       "JP $0150"},
+            {{0x18, 0xFE},             "JR $0100"},          // the classic self-loop
+            {{0x20, 0x05},             "JR NZ, $0107"},      // target, not offset
+            {{0xCD, 0x00, 0xC0},       "CALL $C000"},
+            {{0x08, 0x00, 0xC0},       "LD ($C000), SP"},
+            {{0xE0, 0x44},             "LDH ($44), A"},
+            {{0xF0, 0x44},             "LDH A, ($44)"},
+            {{0xE2},                   "LDH ($FF00+C), A"},
+            {{0x22},                   "LD (HL+), A"},
+            {{0x3A},                   "LD A, (HL-)"},
+            {{0x86},                   "ADD A, (HL)"},
+            {{0xFE, 0x90},             "CP $90"},
+            {{0xE8, 0xFB},             "ADD SP, -5"},        // signed operand
+            {{0xF8, 0x05},             "LD HL, SP+5"},
+            {{0xDF},                   "RST $18"},
+            {{0xCB, 0x40},             "BIT 0, B"},
+            {{0xCB, 0x7E},             "BIT 7, (HL)"},
+            {{0xCB, 0x86},             "RES 0, (HL)"},
+            {{0xCB, 0x30},             "SWAP B"},
+            {{0xD3},                   "<illegal $D3>"},
+        };
+        for (const TextCase &c : text_cases) {
+            Bench b;
+            if (!b.load(c.code)) continue;
+            check_text(c.expected, disassemble(b.bus(), 0x0100).text, c.expected);
+        }
+    }
+
+    // Inspecting must not perturb: the disassembler reads through peek, which
+    // does not advance the clock (decision D15).
+    {
+        Bench b;
+        b.load({0xC3, 0x50, 0x01});
+        const u64 before = b.bus().clock().t_cpu();
+        for (int i = 0; i < 500; ++i) (void)disassemble(b.bus(), 0x0100);
+        report(b.bus().clock().t_cpu() == before,
+               "disassembling 500 times costs no cycles",
+               "the clock moved while inspecting");
+    }
+
+    // The fourteen unconditional jumps: their length is confirmed by where
+    // they land, or by the return address they push.
+    {
+        Bench b; b.load({0x18, 0x05});              // JR +5 at 0x0100
+        b.step();
+        check_u16("JR d lands at pc + 2 + offset", b.cpu().regs().pc, 0x0107);
+    }
+    {
+        Bench b; b.load({0xC3, 0x34, 0x12});        // JP $1234
+        b.step();
+        check_u16("JP nn reads a 16-bit operand", b.cpu().regs().pc, 0x1234);
+    }
+    {
+        Bench b; b.load({0xCD, 0x34, 0x12});        // CALL $1234
+        b.cpu().regs().sp = 0xC002;
+        b.step();
+        check_u16("CALL nn pushes pc + 3",
+                  static_cast<u16>((b.bus().peek(0xC001) << 8) | b.bus().peek(0xC000)), 0x0103);
+    }
+    {
+        // RET, RETI, JP HL and the eight RSTs carry no operand, so their
+        // length is simply asserted to be one byte.
+        const u8 one_byte_jumps[] = {0xC9, 0xD9, 0xE9,
+                                     0xC7, 0xCF, 0xD7, 0xDF, 0xE7, 0xEF, 0xF7, 0xFF};
+        Bench b; b.load({0x00});
+        bool all_one = true;
+        for (u8 op : one_byte_jumps) {
+            b.bus().poke(0x0100, op);
+            if (disassemble(b.bus(), 0x0100).length != 1) all_one = false;
+        }
+        report(all_one, "RET, RETI, JP HL and RST are one byte long",
+               "one of them was reported with the wrong length");
     }
 
     std::printf("\n");
