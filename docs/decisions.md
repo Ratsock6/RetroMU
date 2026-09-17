@@ -563,3 +563,75 @@ That last case is real and visible: mooneye's ROMs and dmg-acid2 both turn the
 screen off while they rewrite video memory, which is why one emulated second
 draws about 52 images rather than 59 for those ROMs. The hardware's 59.727
 frames per second is verified independently of any ROM inside --cpucheck.
+
+---
+
+## D35 — Scanline rendering, composed at the end of mode 3
+
+**Context.** Decision D5 chose scanline rendering over a per-frame renderer
+(too coarse) and a per-pixel FIFO (exact, but far more work).
+
+**Decision.** Each visible line is composed in one pass when mode 3 ends: the
+background and window first, into a buffer that also keeps the raw colour
+index, then the sprites on top. Keeping the raw index is what makes the
+sprite priority rule expressible, since a sprite marked "behind the
+background" still shows over background colour 0.
+
+It is enough for the whole bundle. A FIFO would only be needed for effects
+that change registers in the middle of a line, which no bundle ROM does.
+
+---
+
+## D36 — The framebuffer holds colours, not shade indices
+
+**Context.** A DMG pixel is one of four shades; a CGB pixel is a 15-bit
+colour. The framebuffer has to serve both.
+
+**Decision.** It holds ARGB8888 throughout, and the PPU maps DMG shades
+through a fixed four-colour table. The frontend therefore never has to know
+which model is running, and step 14 fills the same buffer with real colours
+without changing anything downstream.
+
+The greenish palette is a display choice, not hardware: the console's four
+shades are whatever its LCD showed. Isolating it in one table leaves room for
+the UX bonus to offer alternatives.
+
+---
+
+## D37 — The reference image is committed, converted to PPM
+
+**Context.** dmg-acid2 is the canonical PPU test: it draws a face, and every
+feature it exercises has a documented failure mode, so a defect in the
+picture points straight at the bug behind it. Validating against it needs the
+author's reference image.
+
+**Decision.** `tests/expected/dmg-acid2-reference.ppm` holds it, converted
+once from the original 2-bit greyscale PNG into the project's own palette. It
+is MIT-licensed by the same author as the acid2 ROMs already in `roms/`, and
+the licence travels with it.
+
+Converting to PPM rather than keeping the PNG makes the comparison a plain
+byte compare: no network, no image library, no Python, nothing for a corrector
+to install.
+
+Result: 23040 pixels, zero differences.
+
+---
+
+## D38 — Two ways to look at the picture
+
+**Context.** A rendering bug is invisible in a trace and produces no error.
+
+**Decision.** Two tools, deliberately at different levels:
+
+- `--tiles` dumps the 384 tiles in video memory. It checks the building blocks
+  before the assembly: if the tiles are noise, the 2-bit decoding is wrong and
+  nothing downstream can be right. On dmg-acid2 it shows a legible character
+  set, which settled that question in one look.
+- `--screenshot` captures the assembled screen, stopping on the ROM's own
+  `LD B,B` marker so the image is stable rather than caught mid-draw.
+
+A side benefit: the mooneye ROMs print their results on screen, so their
+messages are now readable. `rom_2Mb` shows "TEST FAILED / BANK NUMBER /
+EXPECTED / ACTUAL", which will make step 13 far easier to debug than a bare
+pass or fail.

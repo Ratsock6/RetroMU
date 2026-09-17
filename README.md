@@ -57,6 +57,8 @@ Actual prerequisites: a C++17 compiler (GCC 7+ or Clang 6+), CMake 3.16+, and
 ./build/retroemu --discheck roms/*/*.gb            # disassembler vs CPU
 ./build/retroemu --trace roms/acid2/dmg-acid2.gb --trace-limit 20
 ./build/retroemu --mooneye roms/mooneye/acceptance/*.gb   # run bundle acceptance ROMs
+./build/retroemu --screenshot roms/acid2/dmg-acid2.gb --out screen.ppm
+./build/retroemu --tiles roms/acid2/dmg-acid2.gb --out tiles.ppm
 ./build/retroemu                      # open the window
 ./build/retroemu --scale 6            # window magnified x6
 ./build/retroemu --selftest           # check the graphics pipeline, no window
@@ -85,7 +87,7 @@ the test bundle before moving on.
 | 6 | Trace log and differential validation | done |
 | 7 | Interrupts and timer | done |
 | 8 | PPU: state machine | done |
-| 9 | PPU: background, window, sprites, palettes *(subject V.2)* | todo |
+| 9 | PPU: background, window, sprites, palettes *(subject V.2)* | done |
 | 10 | OAM DMA | todo |
 | 11 | Real-time loop and inputs *(subject V.3, V.4)* | todo |
 | 12 | GUI: load / play / pause *(subject Chapter IV)* | todo |
@@ -105,6 +107,7 @@ the test bundle before moving on.
 ./tests/run_trace_tests.sh        # step 6: tracer and fingerprints (11 checks)
 ./tests/run_timer_tests.sh        # step 7: interrupts and timer   (8 checks)
 ./tests/run_ppu_tests.sh          # step 8: PPU state machine     (11 checks)
+./tests/run_render_tests.sh       # step 9: rendering             (9 checks)
 ```
 
 `run_cartridge_tests.sh` checks the parsed summary of the nine bundled ROMs
@@ -129,6 +132,25 @@ separately:
 They report their verdict through the link port rather than the screen, which
 is what makes it possible to validate the whole instruction set before any
 rendering exists.
+
+### Looking at what is drawn
+
+`--screenshot` runs a ROM and writes what ends up on screen as a PPM. It stops
+on `LD B,B`, an instruction that does nothing on real hardware and which test
+ROMs execute purely as a marker meaning "the picture is ready".
+
+```bash
+./build/retroemu --screenshot roms/acid2/dmg-acid2.gb --out screen.ppm
+```
+
+`--tiles` writes every tile currently in video memory as a 16-across sheet.
+Worth looking at before trusting a rendered screen: if the tiles are noise,
+the two-bits-in-two-bytes decoding is wrong and nothing downstream can be
+right.
+
+```bash
+./build/retroemu --tiles roms/acid2/dmg-acid2.gb --out tiles.ppm
+```
 
 ### Test ROM verdicts
 

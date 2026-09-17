@@ -1,6 +1,7 @@
 #include "retroemu/debug/cpu_selftest.hpp"
 
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -15,8 +16,17 @@ namespace {
 // ---------------------------------------------------------------------------
 //  A machine holding nothing but the instruction under test.
 // ---------------------------------------------------------------------------
+//  NOTE: the Bus and the Cpu are held by pointer rather than by value. A Bus
+//  now carries 32 KiB of work RAM, 16 KiB of video RAM and a 92 KiB
+//  framebuffer, so a Bench is about 150 KiB. This function declares roughly
+//  forty of them in separate scopes, and AddressSanitizer deliberately stops
+//  the compiler reusing one scope's stack slot for the next so it can detect
+//  use-after-scope. All forty therefore coexist, which overflows the stack.
+//  Putting them on the heap costs nothing here and removes the dependency on
+//  a compiler optimisation.
 class Bench {
 public:
+    Bench() : bus_(new Bus), cpu_(new Cpu) {}
     // `code` is placed at the entry point, 0x0100.
     bool load(const std::vector<u8> &code)
     {
@@ -35,27 +45,27 @@ public:
         std::string error;
         if (!cart.load_from_memory(std::move(rom), "<selftest>", error)) return false;
 
-        bus_.attach(std::move(cart), Model::Dmg);
-        cpu_.reset(Model::Dmg);
+        bus_->attach(std::move(cart), Model::Dmg);
+        cpu_->reset(Model::Dmg);
         return true;
     }
 
-    void step() { cpu_.step(bus_); }
+    void step() { cpu_->step(*bus_); }
 
-    Cpu &cpu() { return cpu_; }
-    Bus &bus() { return bus_; }
+    Cpu &cpu() { return *cpu_; }
+    Bus &bus() { return *bus_; }
 
     // T-cycles consumed by the last step, as charged by the bus.
     u32 last_cycles()
     {
-        const u64 before = bus_.clock().t_cpu();
-        cpu_.step(bus_);
-        return static_cast<u32>(bus_.clock().t_cpu() - before);
+        const u64 before = bus_->clock().t_cpu();
+        cpu_->step(*bus_);
+        return static_cast<u32>(bus_->clock().t_cpu() - before);
     }
 
 private:
-    Bus bus_;
-    Cpu cpu_;
+    std::unique_ptr<Bus> bus_;
+    std::unique_ptr<Cpu> cpu_;
 };
 
 int failures = 0;
@@ -719,6 +729,174 @@ int run_cpu_selftest(bool verbose)
         const u8 before = b.bus().peek(0xFF44);
         b.bus().poke(0xFF44, 0x77);
         check_u8("LY is read-only", b.bus().peek(0xFF44), before);
+    }
+
+    // === Rendering ==========================================================
+    //  The console stores building blocks and a plan, never a picture. These
+    //  checks drive one tile through the whole chain and then exercise the
+    //  rules that decide what covers what.
+    if (verbose) std::printf("\n== rendering ==\n");
+    {
+        // Helper: a bench with an identity palette and one known tile.
+        auto make_bench = [](Bench &b) {
+            b.load({0x00});
+            b.bus().poke(0xFF47, 0xE4);     // BGP: colour n maps to shade n
+            b.bus().poke(0xFF48, 0xE4);     // OBP0, likewise
+            b.bus().poke(0xFF49, 0xE4);     // OBP1
+            // Tile 1, first row. The two bits of one pixel come from two
+            // different bytes, which is the part that trips everyone up.
+            //   0x3C = 0 0 1 1 1 1 0 0   low bits
+            //   0x7E = 0 1 1 1 1 1 1 0   high bits
+            //   ->     0 2 3 3 3 3 2 0
+            b.bus().poke(0x8010, 0x3C);
+            b.bus().poke(0x8011, 0x7E);
+            b.bus().poke(0x9800, 0x01);     // top-left map cell uses tile 1
+        };
+        auto pixel = [](Bench &b, int x, int y) {
+            return b.bus().ppu().framebuffer()[static_cast<std::size_t>(y) * kScreenWidth + x];
+        };
+
+        {
+            Bench b; make_bench(b);
+            b.bus().tick(kTCyclesPerFrame);
+            const u8 expected[8] = {0, 2, 3, 3, 3, 3, 2, 0};
+            bool ok = true;
+            for (int x = 0; x < 8; ++x)
+                if (pixel(b, x, 0) != Ppu::dmg_shade(expected[x])) ok = false;
+            report(ok, "a tile decodes to 0 2 3 3 3 3 2 0",
+                   "the two-bits-in-two-bytes decoding is wrong");
+        }
+        {
+            // The palette turns an index into a shade. Changing it repaints
+            // the screen without touching a single pixel, which is how games
+            // fade to black.
+            Bench b; make_bench(b);
+            b.bus().poke(0xFF47, 0x00);     // every index maps to shade 0
+            b.bus().tick(kTCyclesPerFrame);
+            bool ok = true;
+            for (int x = 0; x < 8; ++x)
+                if (pixel(b, x, 0) != Ppu::dmg_shade(0)) ok = false;
+            report(ok, "the palette repaints without touching pixels",
+                   "changing BGP did not change the image");
+        }
+        {
+            // Scrolling moves the map under the screen.
+            Bench b; make_bench(b);
+            b.bus().poke(0xFF43, 0x01);     // SCX = 1
+            b.bus().tick(kTCyclesPerFrame);
+            const u8 expected[7] = {2, 3, 3, 3, 3, 2, 0};
+            bool ok = true;
+            for (int x = 0; x < 7; ++x)
+                if (pixel(b, x, 0) != Ppu::dmg_shade(expected[x])) ok = false;
+            report(ok, "SCX shifts the background", "scrolling did not shift the image");
+        }
+        {
+            // Clearing LCDC bit 0 blanks the background entirely on a DMG.
+            Bench b; make_bench(b);
+            b.bus().poke(0xFF40, 0x90);     // screen on, background off
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 2, 0) == Ppu::dmg_shade(0),
+                   "LCDC bit 0 blanks the background", "the background was still drawn");
+        }
+        {
+            // The window is a second background layer that does not scroll.
+            Bench b; make_bench(b);
+            b.bus().poke(0x9C00, 0x01);     // window map, top-left cell
+            b.bus().poke(0xFF4A, 0x00);     // WY = 0
+            b.bus().poke(0xFF4B, 0x07);     // WX = 7 means x = 0
+            b.bus().poke(0xFF40, 0xF1);     // window on, using the 0x9C00 map
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 1, 0) == Ppu::dmg_shade(2) && pixel(b, 2, 0) == Ppu::dmg_shade(3),
+                   "the window draws over the background", "the window did not appear");
+        }
+        {
+            // A sprite sits at Y-16, X-8: a sprite at (16, 8) lands on (0, 0).
+            Bench b; make_bench(b);
+            b.bus().poke(0xFF40, 0x93);     // sprites enabled
+            b.bus().poke(0x9800, 0x00);     // clear the background behind it
+            b.bus().poke(0xFE00, 16);       // Y
+            b.bus().poke(0xFE01, 8);        // X
+            b.bus().poke(0xFE02, 0x01);     // tile 1
+            b.bus().poke(0xFE03, 0x00);     // no attributes
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 1, 0) == Ppu::dmg_shade(2) && pixel(b, 2, 0) == Ppu::dmg_shade(3),
+                   "a sprite is placed at X-8, Y-16", "the sprite did not appear where expected");
+            report(pixel(b, 0, 0) == Ppu::dmg_shade(0),
+                   "sprite colour 0 is transparent", "colour 0 was drawn");
+        }
+        {
+            // Horizontal flip mirrors the eight pixels.
+            Bench b; make_bench(b);
+            b.bus().poke(0xFF40, 0x93);
+            b.bus().poke(0x9800, 0x00);
+            b.bus().poke(0xFE00, 16); b.bus().poke(0xFE01, 8);
+            b.bus().poke(0xFE02, 0x01); b.bus().poke(0xFE03, 0x20);   // X flip
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 6, 0) == Ppu::dmg_shade(2) && pixel(b, 5, 0) == Ppu::dmg_shade(3),
+                   "a sprite can be flipped horizontally", "the flip had no effect");
+        }
+        {
+            // Attribute bit 7 puts a sprite behind background colours 1 to 3,
+            // but still in front of colour 0.
+            Bench b; make_bench(b);
+            b.bus().poke(0xFF40, 0x93);
+            b.bus().poke(0xFE00, 16); b.bus().poke(0xFE01, 8);
+            b.bus().poke(0xFE02, 0x01); b.bus().poke(0xFE03, 0x80);   // behind the background
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 2, 0) == Ppu::dmg_shade(3),
+                   "a background-priority sprite hides behind colours 1 to 3",
+                   "the sprite was drawn over the background");
+        }
+        {
+            // Only TEN sprites fit on one line, chosen by their order in
+            // memory rather than by position. This is why sprites flicker in
+            // real games when too many crowd a line.
+            Bench b; make_bench(b);
+            b.bus().poke(0xFF40, 0x93);
+            b.bus().poke(0x9800, 0x00);
+            for (int i = 0; i < 11; ++i) {
+                b.bus().poke(static_cast<u16>(0xFE00 + i * 4 + 0), 16);
+                b.bus().poke(static_cast<u16>(0xFE00 + i * 4 + 1), static_cast<u8>(8 + i * 8));
+                b.bus().poke(static_cast<u16>(0xFE00 + i * 4 + 2), 0x01);
+                b.bus().poke(static_cast<u16>(0xFE00 + i * 4 + 3), 0x00);
+            }
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 9 * 8 + 2, 0) == Ppu::dmg_shade(3),
+                   "the tenth sprite on a line is drawn", "the tenth sprite was dropped");
+            report(pixel(b, 10 * 8 + 2, 0) == Ppu::dmg_shade(0),
+                   "the eleventh is not", "an eleventh sprite was drawn");
+        }
+        {
+            // Among the ten, the one further left wins.
+            Bench b; make_bench(b);
+            b.bus().poke(0xFF40, 0x93);
+            b.bus().poke(0x9800, 0x00);
+            b.bus().poke(0x8020, 0xFF); b.bus().poke(0x8021, 0xFF);   // tile 2: solid colour 3
+            // Sprite 0 is further right but earlier in memory; sprite 1 is
+            // further left, so sprite 1 must win.
+            b.bus().poke(0xFE00, 16); b.bus().poke(0xFE01, 9);
+            b.bus().poke(0xFE02, 0x02); b.bus().poke(0xFE03, 0x00);   // solid
+            b.bus().poke(0xFE04, 16); b.bus().poke(0xFE05, 8);
+            b.bus().poke(0xFE06, 0x01); b.bus().poke(0xFE07, 0x00);   // the pattern
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 0, 0) == Ppu::dmg_shade(0),
+                   "the leftmost sprite wins, and its transparent pixel stays transparent",
+                   "the sprite further right showed through");
+        }
+        {
+            // In 8x16 mode the low bit of the tile index is ignored.
+            Bench b; make_bench(b);
+            b.bus().poke(0xFF40, 0x97);     // sprites enabled, 8x16
+            b.bus().poke(0x9800, 0x00);
+            b.bus().poke(0x8030, 0xFF); b.bus().poke(0x8031, 0xFF);   // tile 3, first row
+            b.bus().poke(0xFE00, 16); b.bus().poke(0xFE01, 8);
+            b.bus().poke(0xFE02, 0x03);     // odd index: the hardware uses 2
+            b.bus().poke(0xFE03, 0x00);
+            b.bus().tick(kTCyclesPerFrame);
+            report(pixel(b, 2, 0) != Ppu::dmg_shade(3),
+                   "an 8x16 sprite ignores bit 0 of its tile index",
+                   "the odd tile index was used as is");
+        }
     }
 
     // === The disassembler must agree with the CPU on every opcode ==========

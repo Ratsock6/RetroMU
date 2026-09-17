@@ -53,6 +53,18 @@ inline constexpr u32 kDrawingDots    = 172;   // shortest case; step 9 may vary 
 inline constexpr u8  kVisibleLines   = 144;
 inline constexpr u8  kTotalLines     = 154;
 
+// LCDC (0xFF40) bit assignments.
+enum LcdcBit : u8 {
+    LcdcBgEnable      = 0x01,   // DMG: background and window are drawn at all
+    LcdcObjEnable     = 0x02,
+    LcdcObjSize       = 0x04,   // 0 = 8x8, 1 = 8x16
+    LcdcBgTileMap     = 0x08,   // 0 = 0x9800, 1 = 0x9C00
+    LcdcTileDataArea  = 0x10,   // 1 = 0x8000 unsigned, 0 = 0x8800 signed
+    LcdcWindowEnable  = 0x20,
+    LcdcWindowTileMap = 0x40,   // 0 = 0x9800, 1 = 0x9C00
+    LcdcEnable        = 0x80,   // the screen itself
+};
+
 enum class PpuMode : u8 {
     HBlank  = 0,
     VBlank  = 1,
@@ -93,10 +105,20 @@ public:
     // image is ready to present.
     bool take_frame_ready() { const bool f = frame_ready_; frame_ready_ = false; return f; }
 
+    // --- The produced image -------------------------------------------------
+    //  160x144 pixels in ARGB8888, rebuilt one scanline at a time at the end
+    //  of mode 3. This is what the frontend puts on screen.
+    const std::array<u32, kScreenPixels> &framebuffer() const { return framebuffer_; }
+
+    // The four shades a DMG displays, lightest first. A display choice rather
+    // than hardware: the console has a greenish LCD, and the palette registers
+    // only ever select one of these four.
+    static u32 dmg_shade(u8 index);
+
     // --- Inspection --------------------------------------------------------
     u8      ly() const     { return ly_; }
     PpuMode mode() const   { return mode_; }
-    bool    lcd_on() const { return (lcdc_ & 0x80) != 0; }
+    bool    lcd_on() const { return (lcdc_ & LcdcEnable) != 0; }
     u32     dot() const    { return dot_; }
     u64     elapsed() const { return elapsed_; }
     u64     frames() const  { return frames_; }
@@ -107,6 +129,22 @@ public:
 private:
     void step_dot();
     void enter_mode(PpuMode mode);
+
+    // --- Rendering, run once per visible line at the end of mode 3 ---------
+    void render_scanline();
+    void render_background(u8 line, std::array<u8, kScreenWidth> &bg_color);
+    void render_sprites(u8 line, const std::array<u8, kScreenWidth> &bg_color);
+
+    // Raw VRAM access by bank, for the renderer. Unlike read_vram it ignores
+    // the VBK register: the renderer decides which bank it wants.
+    u8 vram_byte(std::size_t bank, u16 addr) const
+    {
+        return vram_[bank * kVramBankSize + static_cast<std::size_t>(addr - 0x8000)];
+    }
+
+    // A palette register packs four 2-bit shades. Colour index 0 sits in bits
+    // 0-1, index 3 in bits 6-7.
+    static u8 shade_of(u8 palette, u8 color) { return static_cast<u8>((palette >> (color * 2)) & 0x03); }
 
     // The STAT interrupt does not fire once per selected event. All the
     // enabled sources are OR-ed into one internal line, and only a rising
@@ -136,6 +174,14 @@ private:
     bool vblank_irq_  = false;
     bool stat_irq_    = false;
     bool frame_ready_ = false;
+
+    std::array<u32, kScreenPixels> framebuffer_{};
+
+    // The window has a line counter of its own, which only advances on lines
+    // where the window was actually drawn. That is why a window appearing
+    // halfway down the screen starts from its own first row, not from the
+    // screen's.
+    u8 window_line_ = 0;
 
     u8  vram_bank_ = 0;
     u64 elapsed_   = 0;

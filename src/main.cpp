@@ -815,6 +815,129 @@ int run_mooneye(const std::vector<std::string> &roms, bool force_cgb,
     return failures == 0 ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+//  Writing images out (step 9).
+// ---------------------------------------------------------------------------
+//  PPM: a three-line text header followed by raw RGB bytes. No library, no
+//  compression, and it can be inspected by hand.
+// ---------------------------------------------------------------------------
+bool write_ppm(const char *path, const retroemu::u32 *pixels, int width, int height)
+{
+    std::FILE *f = std::fopen(path, "wb");
+    if (f == nullptr) {
+        std::fprintf(stderr, "cannot write '%s'\n", path);
+        return false;
+    }
+    std::fprintf(f, "P6\n%d %d\n255\n", width, height);
+    for (int i = 0; i < width * height; ++i) {
+        const unsigned char rgb[3] = {
+            static_cast<unsigned char>((pixels[i] >> 16) & 0xFF),
+            static_cast<unsigned char>((pixels[i] >> 8) & 0xFF),
+            static_cast<unsigned char>(pixels[i] & 0xFF),
+        };
+        std::fwrite(rgb, 1, 3, f);
+    }
+    std::fclose(f);
+    return true;
+}
+
+// Run a ROM and capture what ends up on screen.
+//
+// Test ROMs signal that their picture is ready by executing LD B,B, an
+// instruction that does nothing on real hardware and is used purely as a
+// marker. Stopping there gives a stable image instead of catching the ROM
+// mid-draw.
+int run_screenshot(const std::string &rom, bool force_cgb, const char *out_path,
+                   retroemu::u64 max_cycles, bool verbose)
+{
+    retroemu::GameBoy gb;
+    std::string error;
+    if (!gb.load(rom, force_cgb, error)) {
+        std::fprintf(stderr, "%s: %s\n", rom.c_str(), error.c_str());
+        return 1;
+    }
+
+    bool marker = false;
+    while (gb.bus().clock().t_cpu() < max_cycles) {
+        if (gb.bus().peek(gb.cpu().regs().pc) == 0x40) { marker = true; break; }
+        gb.step();
+        if (gb.cpu().illegal() || gb.cpu().stopped()) break;
+    }
+
+    // Finish the frame in progress so the image is complete.
+    gb.run_frame();
+
+    const char *path = (out_path != nullptr) ? out_path : "screen.ppm";
+    if (!write_ppm(path, gb.bus().ppu().framebuffer().data(),
+                   retroemu::kScreenWidth, retroemu::kScreenHeight)) {
+        return 1;
+    }
+
+    if (verbose) {
+        std::printf("  ROM     : %s\n", rom.c_str());
+        std::printf("  stopped : %s\n",
+                    marker ? "on the ROM's LD B,B marker" : "on the cycle limit");
+        std::printf("  frames  : %llu\n",
+                    static_cast<unsigned long long>(gb.bus().ppu().frames()));
+        std::printf("  written : %s\n", path);
+    }
+    return 0;
+}
+
+// Dump every tile currently in video memory, 16 across. Before trusting a
+// rendered screen it is worth checking the building blocks themselves: if the
+// tiles look like noise, the 2-bit decoding is wrong and nothing downstream
+// can be right.
+int run_tiles(const std::string &rom, bool force_cgb, const char *out_path,
+              retroemu::u64 max_cycles, bool verbose)
+{
+    retroemu::GameBoy gb;
+    std::string error;
+    if (!gb.load(rom, force_cgb, error)) {
+        std::fprintf(stderr, "%s: %s\n", rom.c_str(), error.c_str());
+        return 1;
+    }
+
+    while (gb.bus().clock().t_cpu() < max_cycles) {
+        if (gb.bus().peek(gb.cpu().regs().pc) == 0x40) break;
+        gb.step();
+        if (gb.cpu().illegal() || gb.cpu().stopped()) break;
+    }
+
+    constexpr int kTiles   = 384;       // 0x8000 to 0x97FF
+    constexpr int kPerRow  = 16;
+    constexpr int kWidth   = kPerRow * 8;
+    constexpr int kHeight  = (kTiles / kPerRow) * 8;
+
+    std::vector<retroemu::u32> image(static_cast<std::size_t>(kWidth) * kHeight, 0);
+    const auto &vram = gb.bus().ppu().vram();
+
+    for (int tile = 0; tile < kTiles; ++tile) {
+        const int base_x = (tile % kPerRow) * 8;
+        const int base_y = (tile / kPerRow) * 8;
+
+        for (int row = 0; row < 8; ++row) {
+            const std::size_t offset = static_cast<std::size_t>(tile) * 16 + row * 2;
+            const retroemu::u8 low  = vram[offset];
+            const retroemu::u8 high = vram[offset + 1];
+
+            for (int px = 0; px < 8; ++px) {
+                const int bit = 7 - px;
+                const retroemu::u8 color =
+                    static_cast<retroemu::u8>((((high >> bit) & 1) << 1) | ((low >> bit) & 1));
+                image[static_cast<std::size_t>(base_y + row) * kWidth + base_x + px] =
+                    retroemu::Ppu::dmg_shade(color);
+            }
+        }
+    }
+
+    const char *path = (out_path != nullptr) ? out_path : "tiles.ppm";
+    if (!write_ppm(path, image.data(), kWidth, kHeight)) return 1;
+
+    if (verbose) std::printf("  %d tiles written to %s (%dx%d)\n", kTiles, path, kWidth, kHeight);
+    return 0;
+}
+
 void print_usage(const char *prog)
 {
     std::printf(
@@ -839,6 +962,9 @@ void print_usage(const char *prog)
         "  --tracediff <a> <b>    report the first divergence between two traces\n"
         "  --tracehash <rom>...   fingerprint of each ROM's first instructions\n"
         "  --mooneye <rom>...     run mooneye tests and read their verdict\n"
+        "  --screenshot <rom>     run a ROM and write what is on screen\n"
+        "  --tiles <rom>          write every tile in video memory\n"
+        "  --out <path>           output file for --screenshot and --tiles\n"
         "  --cgb                  force CGB mode (used with --memtest)\n"
         "  --selftest [file.ppm]  check the graphics pipeline without a window\n"
         "  --scale N              window magnification factor (default: 4)\n"
@@ -859,6 +985,7 @@ int main(int argc, char *argv[])
     retroemu::u64 max_cycles  = 250000000ULL;   // about 60 emulated seconds
     retroemu::u64 trace_limit = 1000000ULL;
     const char   *trace_file  = nullptr;
+    const char   *out_path    = nullptr;
     bool          ly_stub     = false;
 
     std::string              action;
@@ -880,6 +1007,11 @@ int main(int argc, char *argv[])
                 std::fprintf(stderr, "--scale must be between 1 and 16\n");
                 return 1;
             }
+            continue;
+        }
+        if (arg == "--out") {
+            if (i + 1 >= argc) { std::fprintf(stderr, "--out expects a path\n"); return 1; }
+            out_path = argv[++i];
             continue;
         }
         if (arg == "--trace-file") {
@@ -911,7 +1043,7 @@ int main(int argc, char *argv[])
             arg == "--memtest"  || arg == "--run"  || arg == "--cpucheck" ||
             arg == "--debug"    || arg == "--discheck" ||
             arg == "--trace"    || arg == "--tracediff" || arg == "--tracehash" ||
-            arg == "--mooneye") {
+            arg == "--mooneye" || arg == "--screenshot" || arg == "--tiles") {
             if (!action.empty()) {
                 std::fprintf(stderr, "%s and %s cannot be combined\n",
                              action.c_str(), arg.c_str());
@@ -949,7 +1081,9 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "%s expects a ROM file\n", action.c_str());
         return 1;
     }
-    if (action == "--memtest")  return run_memtest(files[0].c_str(), force_cgb);
+    if (action == "--memtest")    return run_memtest(files[0].c_str(), force_cgb);
+    if (action == "--screenshot") return run_screenshot(files[0], force_cgb, out_path, max_cycles, !quiet);
+    if (action == "--tiles")      return run_tiles(files[0], force_cgb, out_path, max_cycles, !quiet);
     if (action == "--discheck") return run_discheck(files, force_cgb, max_cycles);
     if (action == "--trace")
         return run_trace_mode(files[0], force_cgb, trace_file, trace_limit,
