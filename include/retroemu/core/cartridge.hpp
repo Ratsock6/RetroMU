@@ -151,6 +151,13 @@ public:
     bool load_battery();
     bool save_battery() const;
 
+    // Set by load_battery when the file on disk is not the size this
+    // cartridge's RAM expects. The save is still loaded — refusing it would
+    // throw away a player's progress — but the mismatch is reported rather
+    // than swallowed, because it usually means the wrong .sav next to the
+    // wrong ROM. Empty when there is nothing to say.
+    const std::string &save_note() const { return save_note_; }
+
     std::size_t rom_size() const { return mbc_ ? mbc_->rom_size() : 0; }
     const std::vector<u8> &ram() const;
 
@@ -162,6 +169,7 @@ private:
     std::string          path_;
     std::unique_ptr<Mbc> mbc_;         // owns the ROM and the cartridge RAM
     CartridgeHeader      header_;
+    std::string          save_note_;
     u64                  bank_commands_ = 0;
 };
 

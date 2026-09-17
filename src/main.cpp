@@ -17,6 +17,7 @@
 
 #include <array>
 #include <cstdio>
+#include <cerrno>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -245,9 +246,10 @@ void print_cartridge_info(const retroemu::Cartridge &cart)
                 h.global_checksum, h.computed_global_checksum,
                 h.global_checksum_valid() ? "ok" : "mismatch (never checked by hardware)");
 
-    if (!h.warnings.empty()) {
+    if (!h.warnings.empty() || !cart.save_note().empty()) {
         std::printf("\nWarnings:\n");
         for (const std::string &w : h.warnings) std::printf("  - %s\n", w.c_str());
+        if (!cart.save_note().empty()) std::printf("  - %s\n", cart.save_note().c_str());
     }
 }
 
@@ -897,6 +899,28 @@ void print_usage(const char *prog)
         kVersion, prog);
 }
 
+// ---------------------------------------------------------------------------
+//  Command-line numbers
+// ---------------------------------------------------------------------------
+//  strtoull() answers 0 for "abc" and reports nothing, which would silently
+//  turn a typo like `--frames abc` into "no frame limit at all". A flag that
+//  quietly does the opposite of what was asked is worse than one that
+//  refuses, so every number on the command line goes through here.
+// ---------------------------------------------------------------------------
+bool parse_number(const char *text, retroemu::u64 &out)
+{
+    if (text == nullptr || *text == '\0') return false;
+    if (*text == '-' || *text == '+') return false;   // no sign: these are counts
+
+    errno = 0;
+    char *end = nullptr;
+    const unsigned long long value = std::strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0') return false;
+
+    out = static_cast<retroemu::u64>(value);
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char *argv[])
@@ -935,18 +959,26 @@ int main(int argc, char *argv[])
         }
         if (arg == "--frames") {
             if (i + 1 >= argc) { std::fprintf(stderr, "--frames expects a number\n"); return 1; }
-            frame_limit = std::strtoull(argv[++i], nullptr, 10);
+            if (!parse_number(argv[++i], frame_limit)) {
+                std::fprintf(stderr, "--frames: '%s' is not a number\n", argv[i]);
+                return 1;
+            }
             continue;
         }
         if (arg == "--quiet") { quiet = true; continue; }
 
         if (arg == "--scale") {
             if (i + 1 >= argc) { std::fprintf(stderr, "--scale expects a number\n"); return 1; }
-            scale = std::atoi(argv[++i]);
-            if (scale < 1 || scale > 16) {
+            retroemu::u64 value = 0;
+            if (!parse_number(argv[++i], value)) {
+                std::fprintf(stderr, "--scale: '%s' is not a number\n", argv[i]);
+                return 1;
+            }
+            if (value < 1 || value > 16) {
                 std::fprintf(stderr, "--scale must be between 1 and 16\n");
                 return 1;
             }
+            scale = static_cast<int>(value);
             continue;
         }
         if (arg == "--out") {
@@ -961,7 +993,10 @@ int main(int argc, char *argv[])
         }
         if (arg == "--trace-limit") {
             if (i + 1 >= argc) { std::fprintf(stderr, "--trace-limit expects a number\n"); return 1; }
-            trace_limit = std::strtoull(argv[++i], nullptr, 10);
+            if (!parse_number(argv[++i], trace_limit)) {
+                std::fprintf(stderr, "--trace-limit: '%s' is not a number\n", argv[i]);
+                return 1;
+            }
             if (trace_limit == 0) {
                 std::fprintf(stderr, "--trace-limit must be greater than zero\n");
                 return 1;
@@ -971,7 +1006,10 @@ int main(int argc, char *argv[])
         if (arg == "--ly-stub") { ly_stub = true; continue; }
         if (arg == "--max-cycles") {
             if (i + 1 >= argc) { std::fprintf(stderr, "--max-cycles expects a number\n"); return 1; }
-            max_cycles = std::strtoull(argv[++i], nullptr, 10);
+            if (!parse_number(argv[++i], max_cycles)) {
+                std::fprintf(stderr, "--max-cycles: '%s' is not a number\n", argv[i]);
+                return 1;
+            }
             if (max_cycles == 0) {
                 std::fprintf(stderr, "--max-cycles must be greater than zero\n");
                 return 1;

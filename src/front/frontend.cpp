@@ -242,7 +242,13 @@ int run_frontend(const FrontendOptions &options)
     if (!options.rom_path.empty()) {
         std::string error;
         if (!gb.load(options.rom_path, options.force_cgb, error)) {
+            // A path given on the command line that cannot be loaded is a
+            // usage error, so it is reported and the program stops rather
+            // than opening a window on nothing. A bad cartridge chosen from
+            // the browser or dropped onto the window behaves differently on
+            // purpose: there the session continues and the bar says why.
             std::fprintf(stderr, "%s: %s\n", options.rom_path.c_str(), error.c_str());
+            std::fprintf(stderr, "run with no argument to open the cartridge browser instead\n");
             return 1;
         }
     }
@@ -332,6 +338,10 @@ int run_frontend(const FrontendOptions &options)
         loaded_name = path.substr(path.rfind('/') + 1);
         browser.directory = parent_directory(path);
         std::printf("loaded %s\n", path.c_str());
+        // A save file of the wrong size is loaded anyway, but the player is
+        // told: it almost always means the .sav belongs to another cartridge.
+        if (!gb.bus().cartridge().save_note().empty())
+            std::printf("warning: %s\n", gb.bus().cartridge().save_note().c_str());
     };
 
     std::printf("Window %dx%d (scale x%d)\n", screen_w, window_h, options.scale);

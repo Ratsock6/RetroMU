@@ -1030,3 +1030,129 @@ D14) finally pay for themselves. `Clock::advance` already returns system
 cycles, so nothing else in the emulator had to change: the CPU, the timer and
 the sprite copier speed up, and the PPU keeps refreshing the screen 59.727
 times a second because it is fed from the other domain.
+
+---
+
+## D60 — What "handling an error" means here (resolves ambiguity A6)
+
+**Context.** The subject never says which errors must be handled. It does say
+(p.10) that the bonus part is only assessed if the mandatory part is
+"PERFECT... integrally done and works without malfunctioning". A crash in
+front of a corrector is a malfunction whatever caused it, so the absence of a
+written requirement is not permission to crash.
+
+**Decision.** One rule, applied everywhere:
+
+> Bad input is REPORTED and REFUSED. It is never crashed on, and it never
+> silently does something else.
+
+Concretely: exit code 1, a message on stderr naming the file or the option and
+what is wrong with it. Never a signal, never an uncaught exception, never a
+sanitizer report. `tests/run_robustness_tests.sh` asserts exactly that — it
+treats any exit code above 128 as a failure, because that is a signal, and 134
+in particular is an uncaught exception.
+
+**Where the line sits.** A file that cannot BE a cartridge is refused: it does
+not exist, it is empty, it is a directory, it is too small to hold a header,
+it is larger than any cartridge ever made. A file that IS a cartridge but a
+strange one is accepted and reported: a bad checksum, a truncated dump, an
+unknown controller, a size that is not a whole number of banks. Refusing those
+would be wrong — a corrector may well arrive with an imperfect dump — and the
+warnings say what was found.
+
+**Two real bugs this rule uncovered.**
+
+1. A **directory** opens like a file on Linux and then reports a size of
+   `LONG_MAX`, so the loader asked for an eight-exabyte allocation and the
+   program died on `std::bad_alloc` before any of our own error handling ran.
+   Fixed by rejecting directories by name and capping the size at 8 MiB, the
+   largest cartridge that has ever existed.
+
+2. `--frames abc` parsed as 0 through `strtoull`, and 0 means "no frame
+   limit", so a typo silently did the OPPOSITE of what was asked. Every number
+   on the command line now goes through one strict parser that refuses
+   anything that is not entirely a number.
+
+3. The same flaw inside the debugger: `strtoul("-1")` gives 0xFFFFFFFF, which
+   as a step count became a negative `int`, so `s -1` silently stepped nothing
+   at all. The debugger now refuses signs and reports any word typed where a
+   number belongs, instead of falling back to the default. That matters more
+   there than anywhere else: the debugger is the tool you reach for when you
+   already do not trust what is happening.
+
+4. Five `.gitignore` patterns were dead. git does not strip a trailing comment
+   from a pattern line, so `*.sav        # battery RAM` is the literal pattern
+   `*.sav        # battery RAM` and matches nothing. A battery save produced by
+   playing, or the capture a failing test leaves behind, would have been
+   committed by the next `git add -A`. The comments now sit on their own lines,
+   and `tests/expected/*.ppm` is excepted so the reference images stay
+   versioned. `run_robustness_tests.sh` asserts both halves with
+   `git check-ignore`, because a silent pattern is exactly the kind of thing
+   that stays broken.
+
+A save file of the wrong size is a third case, and it is handled differently
+on purpose: it is loaded anyway and the mismatch is reported. Refusing it
+would throw away a player's progress, and silence would hide the fact that the
+`.sav` almost certainly belongs to another cartridge.
+
+---
+
+## D61 — The hardware behaviour deliberately left out
+
+Not everything the real console does is implemented. Each omission below is a
+choice, not an oversight, and each is cheap to revisit if a ROM ever demands
+it.
+
+**VRAM and OAM are always readable.** On real hardware video memory cannot be
+read during mode 3, nor OAM during modes 2 and 3; both return 0xFF. Being
+permissive can only make a well-behaved game work where the hardware would
+have made it fail — never the reverse. No ROM in the bundle tests it, and the
+ones that do (the mealybug tearoom tests) are a T-cycle-accuracy suite far
+beyond what the subject asks. `cgb-acid2`'s own README says a line-based
+renderer is sufficient.
+
+**The unusable region (0xFEA0-0xFEFF) reads 0xFF.** What it really returns
+depends on the console revision and on what the PPU is doing. A constant is
+correct for every ROM in the bundle.
+
+**The serial port sends into the void.** No link cable is mentioned anywhere
+in the subject. The port is implemented only far enough to CAPTURE what a game
+writes, because blargg's test ROMs report their verdict through it — which is
+what let the whole instruction set be validated at step 4, before any screen
+existed.
+
+**No sound.** Sound is a bonus (Ch. VI, p.9), worth 5 points, and the subject
+explicitly allows a library for it.
+
+**No boot sequence.** Also a bonus (Ch. VI, p.9). The mandatory part starts at
+0x0100 with the registers set to the values the real boot ROM leaves behind,
+which is ambiguity A3 resolved in favour of the mandatory part staying
+minimal. The original boot ROM is copyrighted and could not be shipped anyway.
+
+**DMG games are not colourised on a CGB.** A real CGB boot ROM picks a palette
+for known black-and-white games from a table indexed by a hash of the
+cartridge title. That is a boot-ROM feature, and the boot ROM is not
+implemented (above). See D58.
+
+---
+
+## D62 — One command runs everything
+
+**Context.** Fourteen test suites, each with its own script, plus a sanitized
+build that is ten times slower and therefore cannot be the default.
+
+**Decision.** `tests/run_all.sh` builds and runs all of them, and
+`tests/run_all.sh --sanitize` rebuilds with AddressSanitizer and
+UndefinedBehaviorSanitizer and runs the whole thing again underneath them. It
+also fails if the compiler emits a single warning of its own, which is how a
+warning that only the corrector's compiler produces gets caught before the
+corrector does.
+
+The individual scripts remain: while working on one step, running one suite is
+what gives a useful answer quickly. `run_all.sh` is for "is the project
+green", which is the question asked before a commit and at a defence.
+
+The sanitized pass is the one that matters for an emulator. Almost every
+operation here is an 8- or 16-bit wraparound or a shift, and
+UndefinedBehaviorSanitizer is what tells apart a wraparound that was intended
+from one that was not.

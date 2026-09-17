@@ -10,11 +10,25 @@ compile_commands.json
 roms-dev/
 
 # --- Runtime data ----------------------------------------------------------
-*.sav        # battery-backed cartridge RAM (section V.5)
-*.rtc        # real time clock state (MBC3 bonus)
-*.state      # save states (bonus)
-*.ppm        # framebuffer captures
-trace*.log   # CPU trace logs
+# NOTE: a comment must be on a line of its own. git does NOT strip a trailing
+# "# ..." from a pattern, so `*.sav   # save files` is the literal pattern
+# `*.sav   # save files` and matches nothing at all. Every line below was
+# written that way and all five were silently dead until step 15.
+
+# Battery-backed cartridge RAM (section V.5)
+*.sav
+# Real time clock state (MBC3 bonus)
+*.rtc
+# Save states (bonus)
+*.state
+# CPU trace logs
+trace*.log
+
+# Framebuffer captures, including the ones a failing test leaves behind...
+*.ppm
+# ... but NOT the reference images the test suites compare against, which are
+# part of the repository (MIT, see the .LICENSE files beside them).
+!tests/expected/*.ppm
 
 # --- Misc ------------------------------------------------------------------
 .cache/

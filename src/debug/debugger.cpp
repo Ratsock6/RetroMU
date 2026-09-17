@@ -118,6 +118,11 @@ bool parse_number(const std::string &text, u32 &out)
 {
     if (text.empty()) return false;
 
+    // No signs. strtoul happily turns "-1" into 0xFFFFFFFF, which as a step
+    // count becomes a negative int and makes `s -1` silently do nothing --
+    // the same class of bug as `--frames abc` meaning "no limit".
+    if (text[0] == '-' || text[0] == '+') return false;
+
     int         base = 10;
     std::size_t start = 0;
     if (text[0] == '$')                         { base = 16; start = 1; }
@@ -183,6 +188,22 @@ int run_debugger(GameBoy &gb)
         const bool has1 = words.size() > 1 && parse_number(words[1], arg1);
         const bool has2 = words.size() > 2 && parse_number(words[2], arg2);
 
+        // A word that was typed but is not a number is a mistake worth
+        // reporting. Falling back to the default would silently do something
+        // other than what was asked, which is the one thing a debugger must
+        // never do: it is the tool you reach for when you already do not
+        // trust what is happening.
+        //
+        // `k` is the exception: its argument is a button name, not a number.
+        if (cmd != "k") {
+            bool bad_argument = false;
+            if (words.size() > 1 && !has1) { std::printf("  '%s' is not a number\n",
+                                                         words[1].c_str()); bad_argument = true; }
+            if (words.size() > 2 && !has2) { std::printf("  '%s' is not a number\n",
+                                                         words[2].c_str()); bad_argument = true; }
+            if (bad_argument) continue;
+        }
+
         if (cmd == "q" || cmd == "quit") {
             if (gb.save_battery())
                 std::printf("  saved %s\n", gb.bus().cartridge().save_path().c_str());
@@ -205,11 +226,11 @@ int run_debugger(GameBoy &gb)
         }
 
         if (cmd == "s" || cmd == "step") {
-            const int count = has1 ? static_cast<int>(arg1) : 1;
-            for (int i = 0; i < count; ++i) {
+            const u32 count = has1 ? arg1 : 1;
+            for (u32 i = 0; i < count; ++i) {
                 if (!step_once(gb, /*trace=*/count <= 32)) break;
             }
-            if (count > 32) std::printf("  stepped %d instructions\n", count);
+            if (count > 32) std::printf("  stepped %u instructions\n", count);
             std::printf("\n");
             print_registers(gb);
             std::printf("\n");

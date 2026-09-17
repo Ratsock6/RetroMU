@@ -1,5 +1,7 @@
 #include "retroemu/core/cartridge.hpp"
 
+#include <sys/stat.h>
+
 #include <cstdio>
 #include <fstream>
 #include <vector>
@@ -34,6 +36,15 @@ constexpr std::size_t kHeaderEnd        = 0x0150;   // first byte past the heade
 // ROM entirely (see docs/decisions.md, A3), nothing depends on it.
 
 constexpr std::size_t kBankSizeRom = 16 * 1024;   // 16 KiB
+
+// The largest cartridge that ever existed holds 512 banks of 16 KiB: 8 MiB,
+// on MBC5. Nothing bigger is a cartridge.
+//
+// This constant is not decoration. A DIRECTORY opens successfully on Linux
+// and then reports a size of LONG_MAX, so without a ceiling the loader asks
+// for an eight-exabyte allocation and the program dies on std::bad_alloc
+// before any of our own error handling is reached.
+constexpr std::streamoff kMaxRomSize = 8 * 1024 * 1024;
 constexpr std::size_t kBankSizeRam = 8 * 1024;    //  8 KiB
 
 bool is_printable(u8 c) { return c >= 0x20 && c < 0x7F; }
@@ -333,6 +344,17 @@ bool Cartridge::load_from_file(const std::string &path, std::string &error)
     path_ = path;
     mbc_.reset();
     header_ = CartridgeHeader{};
+    save_note_.clear();
+
+    save_note_.clear();
+
+    // A directory opens like a file and reads like nothing, so it has to be
+    // turned away by name rather than discovered halfway through loading.
+    struct stat info;
+    if (stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) {
+        error = "'" + path + "' is a directory, not a cartridge";
+        return false;
+    }
 
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
@@ -343,6 +365,12 @@ bool Cartridge::load_from_file(const std::string &path, std::string &error)
     const std::streamoff size = file.tellg();
     if (size <= 0) {
         error = "'" + path + "' is empty";
+        return false;
+    }
+    if (size > kMaxRomSize) {
+        error = "'" + path + "' is too large to be a cartridge: " +
+                std::to_string(static_cast<unsigned long long>(size)) +
+                " bytes, and no cartridge exceeds 8 MiB";
         return false;
     }
     file.seekg(0, std::ios::beg);
@@ -400,10 +428,24 @@ bool Cartridge::load_battery()
 {
     if (!has_battery() || !mbc_) return false;
 
-    std::ifstream file(save_path(), std::ios::binary);
+    std::ifstream file(save_path(), std::ios::binary | std::ios::ate);
     if (!file) return false;   // no save yet is not an error
 
     std::vector<u8> &ram = mbc_->ram();
+    const std::streamoff on_disk = file.tellg();
+
+    // A mismatch is loaded anyway — a short file fills what it can and a long
+    // one is cut — because refusing it would throw away a player's progress.
+    // It is reported instead, since it almost always means the .sav belongs to
+    // another cartridge.
+    if (on_disk < 0 || static_cast<std::size_t>(on_disk) != ram.size()) {
+        save_note_ = "save file is " +
+                     std::to_string(on_disk < 0 ? 0LL : static_cast<long long>(on_disk)) +
+                     " bytes, this cartridge has " + std::to_string(ram.size()) +
+                     " bytes of RAM";
+    }
+
+    file.seekg(0, std::ios::beg);
     file.read(reinterpret_cast<char *>(ram.data()), static_cast<std::streamsize>(ram.size()));
     return true;
 }

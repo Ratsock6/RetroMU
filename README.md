@@ -43,6 +43,10 @@ Actual prerequisites: a C++17 compiler (GCC 7+ or Clang 6+), CMake 3.16+, and
 | `-DRETROEMU_FORCE_FETCH_SDL2=ON` | `OFF` | Ignore system SDL2 and rebuild it |
 | `-DRETROEMU_WARNINGS=OFF` | `ON` | Disable strict warnings |
 
+Strict warnings are on by default, and the build is expected to produce none.
+`tests/run_all.sh` fails if it produces any, which is how a warning that only
+one compiler emits gets caught before a corrector sees it.
+
 ---
 
 ## Usage
@@ -95,7 +99,33 @@ the test bundle before moving on.
 | 12 | GUI: load / play / pause *(subject Chapter IV)* | done |
 | 13 | MBC1, MBC2, MBC5 and battery saves *(subject V.5)* | done |
 | 14 | CGB: palettes, VRAM bank, HDMA, double speed *(subject V.6)* | done |
-| 15 | Robustness and finalisation | todo |
+| 15 | Robustness and finalisation | done |
+
+---
+
+## What the subject requires, and what proves it
+
+Every mandatory requirement, the code that implements it, and the test that
+demonstrates it.
+
+| Subject | Requirement | Implementation | Proof |
+|---|---|---|---|
+| Ch. IV, p.6 | Build in a single command | `CMakeLists.txt`, `cmake/SDL2Setup.cmake` | `cmake -B build && cmake --build build -j` on a machine with no SDL2 |
+| Ch. IV, p.6 | GUI with load, play, pause | `src/front/frontend.cpp` | `run_gui_tests.sh` (headless, scripted key presses) |
+| V.1, p.7 | Disassembler | `src/debug/disassembler.cpp` | `run_debug_tests.sh`; 497 opcodes cross-checked against the CPU in `--cpucheck` |
+| V.2, p.7 | Debugger: registers, memory, breakpoints, step | `src/debug/debugger.cpp` | `run_debug_tests.sh` (22 checks) |
+| V.2, p.7 | Display: background, window, sprites, palettes | `src/core/ppu.cpp` | `run_render_tests.sh` — `dmg-acid2` identical to its reference, pixel for pixel |
+| V.3, p.7 | Normal speed | `Pacer` in `src/front/frontend.cpp` | `run_input_tests.sh` measures the frame rate over 180 frames |
+| V.4, p.7 | The eight buttons | `src/core/joypad.cpp` | `run_input_tests.sh` (14 checks) |
+| V.5, p.8 | MBC1, MBC2, MBC5 | `src/core/mbc.cpp` | `run_mbc_tests.sh` — the bundle's four mooneye MBC ROMs pass |
+| V.5, p.8 | Battery saves persisted on disk | `Cartridge::load_battery` / `save_battery` | `run_mbc_tests.sh` writes, reloads and compares |
+| V.6, p.8 | Game Boy Color | `src/core/ppu.cpp`, `src/core/bus.cpp` | `run_cgb_tests.sh` — `cgb-acid2` identical to its reference, pixel for pixel |
+| p.10 | "Works without malfunctioning" | strict input handling throughout | `run_robustness_tests.sh` (62 checks) |
+
+Timing is validated separately by the mooneye acceptance ROMs (`div_timing`,
+`intr_timing`, `oam_dma/basic`), which check that the timer, the interrupts
+and the sprite copier see each memory access at the exact cycle the hardware
+would.
 
 ---
 
@@ -115,7 +145,18 @@ the test bundle before moving on.
 ./tests/run_gui_tests.sh          # step 12: the interface        (15 checks)
 ./tests/run_mbc_tests.sh          # step 13: controllers, saves   (16 checks)
 ./tests/run_cgb_tests.sh          # step 14: Game Boy Color       (17 checks)
+./tests/run_robustness_tests.sh   # step 15: wrong input          (62 checks)
 ```
+
+Or all of them at once:
+
+```bash
+./tests/run_all.sh              # build, then every suite
+./tests/run_all.sh --sanitize   # and again under ASan + UBSan
+```
+
+`run_all.sh` also fails if the compiler emits a single warning, which is how a
+warning that only appears on another compiler gets caught early.
 
 `run_cartridge_tests.sh` checks the parsed summary of the nine bundled ROMs
 against a golden file and exercises the malformed-input paths (missing, empty,
@@ -172,6 +213,31 @@ Cartridges with a battery keep their data in a `.sav` file next to the ROM,
 written when the emulator closes or loads something else, and read back when
 the cartridge is loaded again. A cartridge the game never wrote to leaves no
 file behind.
+
+### When the input is wrong
+
+The subject does not list the errors that must be handled, but it does require
+(p.10) that the mandatory part "works without malfunctioning". One rule is
+applied everywhere:
+
+> Bad input is **reported and refused**. Never crashed on, and never silently
+> something else.
+
+A file that cannot be a cartridge is refused with a message saying why: it
+does not exist, it is empty, it is a directory, it is too small to hold a
+header, it is larger than any cartridge ever made. A file that *is* a
+cartridge but a strange one — bad checksum, truncated dump, unknown
+controller — is accepted and its oddities are listed, because a corrector may
+well arrive with an imperfect dump.
+
+A save file whose size does not match the cartridge is loaded anyway and the
+mismatch is reported: refusing it would throw away a player's progress, and
+saying nothing would hide the fact that the `.sav` probably belongs to another
+game.
+
+`run_robustness_tests.sh` asserts all of this, and treats any exit code above
+128 as a failure — that is a signal, and 134 in particular is an uncaught
+exception.
 
 ### The interface
 
