@@ -118,6 +118,23 @@ public:
     // Returns false and fills `error` on failure. The object is left empty.
     bool load_from_file(const std::string &path, std::string &error);
 
+    // --- Access from the bus ------------------------------------------------
+    //  Handles 0x0000-0x7FFF (ROM) and 0xA000-0xBFFF (external RAM).
+    //
+    //  STEP 3 SCOPE: the ROM window is mapped flat, so only the first 32 KiB
+    //  of a banked cartridge is reachable and writes into the ROM range are
+    //  dropped. Step 13 replaces this with the real MBC1/MBC2/MBC5 logic
+    //  required by section V.5 of the subject.
+    u8   read(u16 addr) const;
+    void write(u16 addr, u8 value);
+
+    // True once a write into the ROM range has been seen: on real hardware
+    // that is a bank-switch command. Useful before step 13 to show that such
+    // commands are being issued and are currently ignored.
+    u64 bank_commands_seen() const { return bank_commands_; }
+
+    const std::vector<u8> &ram() const { return ram_; }
+
     bool                    loaded() const { return !rom_.empty(); }
     const std::string      &path()   const { return path_; }
     const std::vector<u8>  &rom()    const { return rom_; }
@@ -126,7 +143,9 @@ public:
 private:
     std::string       path_;
     std::vector<u8>   rom_;
+    std::vector<u8>   ram_;            // external RAM, sized from the header
     CartridgeHeader   header_;
+    u64               bank_commands_ = 0;
 };
 
 }  // namespace retroemu

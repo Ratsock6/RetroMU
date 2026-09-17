@@ -357,7 +357,45 @@ bool Cartridge::load_from_file(const std::string &path, std::string &error)
         rom_.clear();
         return false;
     }
+
+    // Allocate the external RAM announced by the header. 0xFF is what an
+    // uninitialised chip reads as; a battery save will overwrite it in step 13.
+    ram_.assign(header_.ram_size, 0xFF);
+    bank_commands_ = 0;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+//  Access from the bus
+// ---------------------------------------------------------------------------
+u8 Cartridge::read(u16 addr) const
+{
+    if (addr < 0x8000) {
+        // Flat mapping until step 13. A banked cartridge reads 0xFF past its
+        // first 32 KiB rather than running off the end of the buffer.
+        return addr < rom_.size() ? rom_[addr] : 0xFF;
+    }
+    if (addr >= 0xA000 && addr < 0xC000) {
+        const std::size_t offset = static_cast<std::size_t>(addr - 0xA000);
+        return offset < ram_.size() ? ram_[offset] : 0xFF;   // no RAM -> open bus
+    }
+    return 0xFF;
+}
+
+void Cartridge::write(u16 addr, u8 value)
+{
+    if (addr < 0x8000) {
+        // ROM is read-only: nothing is stored. On real hardware these bytes
+        // reach the MBC chip and mean "switch bank". Counted, not obeyed,
+        // until step 13.
+        ++bank_commands_;
+        return;
+    }
+    if (addr >= 0xA000 && addr < 0xC000) {
+        const std::size_t offset = static_cast<std::size_t>(addr - 0xA000);
+        if (offset < ram_.size()) ram_[offset] = value;
+        return;
+    }
 }
 
 }  // namespace retroemu

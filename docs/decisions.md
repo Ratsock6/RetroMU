@@ -208,3 +208,44 @@ the open-source boot ROM chosen at that point, never from this repository.
 
 Rationale: a corrector handing over an unusual homebrew ROM should see a clear
 diagnostic, not a crash and not a silent wrong result.
+
+---
+
+## D13 — The PPU owns VRAM and OAM from the start
+
+**Context.** Step 3 needs somewhere to route 0x8000-0x9FFF and 0xFE00-0xFE9F,
+but the PPU itself is not written until step 8.
+
+**Alternatives.** Park the arrays inside the Bus and move them into the Ppu
+class later; or create a minimal Ppu now that owns them.
+
+**Decision.** Create the Ppu class immediately, owning VRAM and OAM and
+accepting cycles, with no behaviour yet. Steps 8 and 9 then only add logic,
+they never move data. The array is already sized for the CGB's two VRAM banks
+(subject V.6, p.8), so enabling VBK later is a one-line change rather than a
+reallocation.
+
+---
+
+## D14 — The clock owns the CPU-to-system conversion
+
+**Context.** In CGB double-speed mode the CPU runs twice as fast while the PPU
+does not, so any code that feeds CPU cycles to the PPU is wrong.
+
+**Decision.** `Clock::advance(t)` takes CPU-domain cycles and **returns** how
+many system-domain cycles elapsed. `Bus::tick` passes that return value to the
+PPU rather than dividing by two itself. One place performs the conversion, so
+the two domains cannot drift apart, and the odd remainder is carried rather
+than truncated.
+
+---
+
+## D15 — `peek` is separate from `read`
+
+**Context.** Section V.1 of the subject (p.7) requires a debugger that
+displays the next instruction to execute. Disassembling means reading memory.
+
+**Decision.** `Bus::read` advances the clock and may have side effects;
+`Bus::peek` is `const`, advances nothing and has none. The debugger and the
+disassembler use `peek` exclusively, so inspecting the machine can never
+perturb the emulation it is inspecting.

@@ -50,6 +50,7 @@ Actual prerequisites: a C++17 compiler (GCC 7+ or Clang 6+), CMake 3.16+, and
 ```bash
 ./build/retroemu --info roms/acid2/dmg-acid2.gb    # decode one cartridge header
 ./build/retroemu --list roms/**/*.gb               # one summary line per ROM
+./build/retroemu --memtest roms/acid2/dmg-acid2.gb # walk the memory map, check the clock
 ./build/retroemu                      # open the window
 ./build/retroemu --scale 6            # window magnified x6
 ./build/retroemu --selftest           # check the graphics pipeline, no window
@@ -72,7 +73,7 @@ the test bundle before moving on.
 | 0 | Hexadecimal / bitwise warm-up | done |
 | 1 | CMake skeleton + SDL2 + 160x144 window | done |
 | 2 | Cartridge: ROM loading and header parsing | done |
-| 3 | Bus / MMU with tick-on-access | todo |
+| 3 | Bus / MMU with tick-on-access | done |
 | 4 | CPU: registers, flags, instruction set | todo |
 | 5 | Disassembler and debugger *(subject V.1)* | todo |
 | 6 | Trace log and differential validation | todo |
@@ -91,13 +92,28 @@ the test bundle before moving on.
 ## Tests
 
 ```bash
-./tests/run_cartridge_tests.sh
+./tests/run_cartridge_tests.sh    # step 2: header parsing        (18 checks)
+./tests/run_bus_tests.sh          # step 3: dispatch and clock    (30 checks)
 ```
 
-Checks the parsed summary of the nine bundled ROMs against a golden file and
-exercises the malformed-input paths (missing, empty, truncated and corrupted
-files). Pass `--update` to regenerate the golden file after an intentional
-format change.
+`run_cartridge_tests.sh` checks the parsed summary of the nine bundled ROMs
+against a golden file and exercises the malformed-input paths (missing, empty,
+truncated and corrupted files). Pass `--update` to regenerate the golden file
+after an intentional format change.
+
+`run_bus_tests.sh` checks that every address reaches its owner, that ROM
+rejects writes while RAM accepts them, that echo RAM mirrors correctly, and
+that the clock charges exactly 4 T-cycles per access while the two clock
+domains diverge in double-speed mode.
+
+Both scripts honour `RETROEMU_BIN` if you want to point them at another
+binary, for instance a sanitizer build:
+
+```bash
+cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DRETROEMU_SANITIZE=ON
+cmake --build build-asan -j
+RETROEMU_BIN=$PWD/build-asan/retroemu ./tests/run_bus_tests.sh
+```
 
 ---
 
@@ -114,6 +130,9 @@ RetroEmu/
 ├── src/
 │   ├── main.cpp            entry point and CLI
 │   └── core/               emulator core (no SDL here)
+│       ├── cartridge.cpp   ROM loading and header parsing
+│       ├── bus.cpp         address dispatch and the master clock
+│       └── ppu.cpp         owns VRAM and OAM (rendering from step 9)
 ├── roms/                   MIT test bundle (versioned)
 ├── roms-dev/               development ROMs (gitignored)
 ├── tests/                  regression scripts and golden files

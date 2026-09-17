@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "retroemu/core/bus.hpp"
 #include "retroemu/core/cartridge.hpp"
 #include "retroemu/core/types.hpp"
 
@@ -385,6 +386,132 @@ int run_cartridge_report(char *argv[], int first, int argc, bool compact)
     return failures == 0 ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+//  Memory map walk (step 3).
+// ---------------------------------------------------------------------------
+//  Proves three things at once:
+//    - every address is routed to the right owner;
+//    - every access costs exactly 4 T-cycles, charged as it happens;
+//    - the CPU and system clock domains diverge in double-speed mode.
+// ---------------------------------------------------------------------------
+void probe(retroemu::Bus &bus, retroemu::u16 addr, const char *note)
+{
+    const retroemu::u8 before = bus.read(addr);
+
+    // Try to write the complement and read it back: that tells us whether the
+    // region is writable, without needing a hard-coded list.
+    const retroemu::u8 probe_value = static_cast<retroemu::u8>(~before);
+    bus.write(addr, probe_value);
+    const retroemu::u8 after = bus.read(addr);
+    const bool writable = (after == probe_value);
+    bus.write(addr, before);   // put it back
+
+    std::printf("  0x%04X  %-16s 0x%02X   %-9s %s\n",
+                addr, retroemu::to_string(retroemu::region_of(addr)), before,
+                writable ? "writable" : "read-only", note);
+}
+
+int run_memtest(const char *rom_path, bool force_cgb)
+{
+    retroemu::Cartridge cart;
+    std::string error;
+    if (!cart.load_from_file(rom_path, error)) {
+        std::fprintf(stderr, "%s: %s\n", rom_path, error.c_str());
+        return 1;
+    }
+
+    // The model comes from the cartridge header unless it is forced.
+    const bool cgb_cart = cart.header().cgb != retroemu::CgbSupport::None;
+    const retroemu::Model model =
+        (force_cgb || cgb_cart) ? retroemu::Model::Cgb : retroemu::Model::Dmg;
+
+    retroemu::Bus bus;
+    bus.attach(std::move(cart), model);
+
+    std::printf("Memory map walk: %s\n", rom_path);
+    std::printf("Model          : %s\n\n", bus.model_name());
+
+    std::printf("  ADDR    REGION           READ   ACCESS    NOTE\n");
+    std::printf("  ------  ---------------- -----  --------- ----------------------------\n");
+    probe(bus, 0x0000, "cartridge header area");
+    probe(bus, 0x0100, "entry point");
+    probe(bus, 0x2000, "write here = bank switch command");
+    probe(bus, 0x4000, "switchable ROM bank");
+    probe(bus, 0x8000, "VRAM, owned by the PPU");
+    probe(bus, 0xA000, "external RAM (cartridge)");
+    probe(bus, 0xC000, "WRAM bank 0");
+    probe(bus, 0xD000, "WRAM bank N");
+    probe(bus, 0xFE00, "OAM, owned by the PPU");
+    probe(bus, 0xFEA0, "unusable region");
+    probe(bus, 0xFF40, "I/O register (LCDC)");
+    probe(bus, 0xFF80, "HRAM");
+    probe(bus, 0xFFFF, "interrupt enable");
+
+    // --- Echo RAM ----------------------------------------------------------
+    std::printf("\nEcho RAM (0xE000-0xFDFF mirrors 0xC000-0xDDFF)\n");
+    bus.write(0xC000, 0x42);
+    const retroemu::u8 echoed = bus.read(0xE000);
+    std::printf("  wrote 0x42 at 0xC000, read 0x%02X at 0xE000   %s\n",
+                echoed, echoed == 0x42 ? "mirrored" : "NOT MIRRORED");
+    bus.write(0xE001, 0x99);
+    const retroemu::u8 back = bus.read(0xC001);
+    std::printf("  wrote 0x99 at 0xE001, read 0x%02X at 0xC001   %s\n",
+                back, back == 0x99 ? "mirrored" : "NOT MIRRORED");
+
+    // --- Writing into ROM ---------------------------------------------------
+    std::printf("\nWriting into ROM (0x0000-0x7FFF)\n");
+    const retroemu::u8 rom_before = bus.read(0x0000);
+    bus.write(0x2000, 0x05);
+    std::printf("  0x0000 still reads 0x%02X (unchanged), and the cartridge\n", rom_before);
+    std::printf("  recorded %llu bank-switch command(s), ignored until step 13\n",
+                static_cast<unsigned long long>(bus.cartridge().bank_commands_seen()));
+
+    // --- Clock accounting ---------------------------------------------------
+    const retroemu::u64 accesses = bus.access_count();
+    const retroemu::u64 t_cpu    = bus.clock().t_cpu();
+    std::printf("\nClock accounting\n");
+    std::printf("  accesses performed : %llu\n", static_cast<unsigned long long>(accesses));
+    std::printf("  t_cpu elapsed      : %llu\n", static_cast<unsigned long long>(t_cpu));
+    std::printf("  cycles per access  : %llu   %s\n",
+                static_cast<unsigned long long>(accesses ? t_cpu / accesses : 0),
+                (accesses && t_cpu == accesses * 4) ? "(exactly 4, as the hardware charges)" : "(UNEXPECTED)");
+
+    // peek() must be free and invisible.
+    const retroemu::u64 before_peek = bus.clock().t_cpu();
+    for (int i = 0; i < 1000; ++i) (void)bus.peek(static_cast<retroemu::u16>(i));
+    std::printf("  1000 peek() calls  : t_cpu moved by %llu   %s\n",
+                static_cast<unsigned long long>(bus.clock().t_cpu() - before_peek),
+                bus.clock().t_cpu() == before_peek ? "(free, as the debugger needs)" : "(UNEXPECTED)");
+
+    // --- Double speed -------------------------------------------------------
+    // The whole point of decision D8: on CGB the CPU can run twice as fast
+    // while the PPU keeps its own pace.
+    std::printf("\nDouble-speed mode (CGB, subject V.6)\n");
+    const retroemu::u64 cpu0 = bus.clock().t_cpu();
+    const retroemu::u64 sys0 = bus.clock().t_sys();
+    for (int i = 0; i < 10; ++i) (void)bus.read(0xC000);
+    std::printf("  normal speed, 10 accesses : t_cpu +%llu, t_sys +%llu\n",
+                static_cast<unsigned long long>(bus.clock().t_cpu() - cpu0),
+                static_cast<unsigned long long>(bus.clock().t_sys() - sys0));
+
+    bus.set_double_speed(true);
+    const retroemu::u64 cpu1 = bus.clock().t_cpu();
+    const retroemu::u64 sys1 = bus.clock().t_sys();
+    for (int i = 0; i < 10; ++i) (void)bus.read(0xC000);
+    const retroemu::u64 dcpu = bus.clock().t_cpu() - cpu1;
+    const retroemu::u64 dsys = bus.clock().t_sys() - sys1;
+    std::printf("  double speed, 10 accesses : t_cpu +%llu, t_sys +%llu   %s\n",
+                static_cast<unsigned long long>(dcpu),
+                static_cast<unsigned long long>(dsys),
+                dsys * 2 == dcpu ? "(the PPU sees half: correct)" : "(UNEXPECTED)");
+    std::printf("  PPU cycles received       : %llu = t_sys total (%llu)   %s\n",
+                static_cast<unsigned long long>(bus.ppu().elapsed()),
+                static_cast<unsigned long long>(bus.clock().t_sys()),
+                bus.ppu().elapsed() == bus.clock().t_sys() ? "(in sync)" : "(UNEXPECTED)");
+
+    return 0;
+}
+
 void print_usage(const char *prog)
 {
     std::printf(
@@ -395,6 +522,8 @@ void print_usage(const char *prog)
         "Options:\n"
         "  --info <rom>...        print the cartridge header of each ROM\n"
         "  --list <rom>...        print one summary line per ROM\n"
+        "  --memtest <rom>        walk the memory map and check the clock\n"
+        "  --cgb                  force CGB mode (used with --memtest)\n"
         "  --selftest [file.ppm]  check the graphics pipeline without a window\n"
         "  --scale N              window magnification factor (default: 4)\n"
         "  --version              print version and exit\n"
@@ -406,7 +535,8 @@ void print_usage(const char *prog)
 
 int main(int argc, char *argv[])
 {
-    int scale = 4;
+    int  scale     = 4;
+    bool force_cgb = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -428,6 +558,17 @@ int main(int argc, char *argv[])
         }
         if (arg == "--list") {
             return run_cartridge_report(argv, i + 1, argc, /*compact=*/true);
+        }
+        if (arg == "--memtest") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--memtest expects a ROM file\n");
+                return 1;
+            }
+            return run_memtest(argv[i + 1], force_cgb);
+        }
+        if (arg == "--cgb") {
+            force_cgb = true;
+            continue;
         }
         if (arg == "--scale") {
             if (i + 1 >= argc) {
