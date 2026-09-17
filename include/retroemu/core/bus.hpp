@@ -117,6 +117,14 @@ public:
     void set_interrupt_flags(u8 value) { io_[0x0F] = static_cast<u8>(value & 0x1F); }
     void request_interrupt(Interrupt which) { io_[0x0F] |= static_cast<u8>(which & 0x1F); }
 
+    // --- Validation aid ----------------------------------------------------
+    //  The standard differential-testing tool for this hardware compares
+    //  against reference logs recorded without a PPU, which requires LY
+    //  (0xFF44) to read back as 0x90. Off by default; the emulator itself
+    //  never turns it on.
+    void set_ly_stub(bool on) { ly_stub_ = on; }
+    bool ly_stub() const { return ly_stub_; }
+
     // --- Serial port -------------------------------------------------------
     //  Not required by the subject (no link cable is mentioned anywhere), but
     //  blargg's test ROMs report their results through it, which is how the
@@ -151,6 +159,8 @@ private:
     std::array<u8, 0x80> io_{};
 
     std::string serial_;         // everything the game sent over the link port
+
+    bool ly_stub_ = false;       // see set_ly_stub
 
     u8  interrupt_enable_ = 0;   // 0xFFFF
     u8  svbk_             = 1;   // 0xFF70, CGB WRAM bank select

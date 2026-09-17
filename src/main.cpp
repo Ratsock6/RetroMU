@@ -28,6 +28,7 @@
 #include "retroemu/debug/cpu_selftest.hpp"
 #include "retroemu/debug/debugger.hpp"
 #include "retroemu/debug/disassembler.hpp"
+#include "retroemu/debug/tracer.hpp"
 #include "retroemu/core/types.hpp"
 
 namespace {
@@ -690,6 +691,62 @@ int run_discheck(const std::vector<std::string> &roms, bool force_cgb, retroemu:
     return 1;
 }
 
+// ---------------------------------------------------------------------------
+//  Tracing (step 6).
+// ---------------------------------------------------------------------------
+int run_trace_mode(const std::string &rom, bool force_cgb, const char *out_path,
+                   retroemu::u64 limit, retroemu::u64 max_cycles, bool ly_stub,
+                   bool verbose)
+{
+    retroemu::GameBoy gb;
+    std::string error;
+    if (!gb.load(rom, force_cgb, error)) {
+        std::fprintf(stderr, "%s: %s\n", rom.c_str(), error.c_str());
+        return 1;
+    }
+
+    std::FILE *out = stdout;
+    if (out_path != nullptr) {
+        out = std::fopen(out_path, "w");
+        if (out == nullptr) {
+            std::fprintf(stderr, "cannot write '%s'\n", out_path);
+            return 1;
+        }
+    }
+
+    retroemu::TraceOptions options;
+    options.max_instructions = limit;
+    options.max_cycles       = max_cycles;
+    options.ly_stub          = ly_stub;
+
+    const retroemu::u64 lines = retroemu::run_trace(gb, out, options);
+
+    if (out != stdout) {
+        std::fclose(out);
+        if (verbose)
+            std::printf("  %llu instructions traced into %s\n",
+                        static_cast<unsigned long long>(lines), out_path);
+    }
+    return 0;
+}
+
+// Fingerprint of a ROM's first instructions. Cheap to store, and any change
+// in CPU behaviour moves it.
+int run_tracehash(const std::vector<std::string> &roms, bool force_cgb,
+                  retroemu::u64 instructions)
+{
+    for (const std::string &rom : roms) {
+        retroemu::GameBoy gb;
+        std::string error;
+        if (!gb.load(rom, force_cgb, error)) {
+            std::fprintf(stderr, "%s: %s\n", rom.c_str(), error.c_str());
+            return 1;
+        }
+        std::printf("%s  %s\n", retroemu::trace_digest(gb, instructions).c_str(), rom.c_str());
+    }
+    return 0;
+}
+
 void print_usage(const char *prog)
 {
     std::printf(
@@ -707,6 +764,12 @@ void print_usage(const char *prog)
         "  --cpucheck             run the built-in CPU self-test\n"
         "  --debug <rom>          open the interactive debugger\n"
         "  --discheck <rom>...    cross-check the disassembler against the CPU\n"
+        "  --trace <rom>          log the CPU state of every instruction\n"
+        "  --trace-file <path>    write the trace to a file instead of stdout\n"
+        "  --trace-limit N        instructions to trace (default 1000000)\n"
+        "  --ly-stub              make LY read 0x90, for reference-log comparison\n"
+        "  --tracediff <a> <b>    report the first divergence between two traces\n"
+        "  --tracehash <rom>...   fingerprint of each ROM's first instructions\n"
         "  --cgb                  force CGB mode (used with --memtest)\n"
         "  --selftest [file.ppm]  check the graphics pipeline without a window\n"
         "  --scale N              window magnification factor (default: 4)\n"
@@ -724,7 +787,10 @@ int main(int argc, char *argv[])
     int           scale      = 4;
     bool          force_cgb  = false;
     bool          quiet      = false;
-    retroemu::u64 max_cycles = 250000000ULL;   // about 60 emulated seconds
+    retroemu::u64 max_cycles  = 250000000ULL;   // about 60 emulated seconds
+    retroemu::u64 trace_limit = 1000000ULL;
+    const char   *trace_file  = nullptr;
+    bool          ly_stub     = false;
 
     std::string              action;
     std::vector<std::string> files;
@@ -747,6 +813,21 @@ int main(int argc, char *argv[])
             }
             continue;
         }
+        if (arg == "--trace-file") {
+            if (i + 1 >= argc) { std::fprintf(stderr, "--trace-file expects a path\n"); return 1; }
+            trace_file = argv[++i];
+            continue;
+        }
+        if (arg == "--trace-limit") {
+            if (i + 1 >= argc) { std::fprintf(stderr, "--trace-limit expects a number\n"); return 1; }
+            trace_limit = std::strtoull(argv[++i], nullptr, 10);
+            if (trace_limit == 0) {
+                std::fprintf(stderr, "--trace-limit must be greater than zero\n");
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--ly-stub") { ly_stub = true; continue; }
         if (arg == "--max-cycles") {
             if (i + 1 >= argc) { std::fprintf(stderr, "--max-cycles expects a number\n"); return 1; }
             max_cycles = std::strtoull(argv[++i], nullptr, 10);
@@ -759,7 +840,8 @@ int main(int argc, char *argv[])
 
         if (arg == "--selftest" || arg == "--info" || arg == "--list" ||
             arg == "--memtest"  || arg == "--run"  || arg == "--cpucheck" ||
-            arg == "--debug"    || arg == "--discheck") {
+            arg == "--debug"    || arg == "--discheck" ||
+            arg == "--trace"    || arg == "--tracediff" || arg == "--tracehash") {
             if (!action.empty()) {
                 std::fprintf(stderr, "%s and %s cannot be combined\n",
                              action.c_str(), arg.c_str());
@@ -782,6 +864,14 @@ int main(int argc, char *argv[])
     if (action == "--info")     return run_cartridge_report(files, /*compact=*/false);
     if (action == "--list")     return run_cartridge_report(files, /*compact=*/true);
     if (action == "--cpucheck") return retroemu::run_cpu_selftest(!quiet) == 0 ? 0 : 1;
+    if (action == "--tracediff") {
+        if (files.size() < 2) {
+            std::fprintf(stderr, "--tracediff expects two trace files\n");
+            return 1;
+        }
+        return retroemu::diff_traces(files[0], files[1], 5);
+    }
+    if (action == "--tracehash") return run_tracehash(files, force_cgb, trace_limit);
 
     // The remaining actions take exactly one ROM.
     if (files.empty()) {
@@ -790,6 +880,9 @@ int main(int argc, char *argv[])
     }
     if (action == "--memtest")  return run_memtest(files[0].c_str(), force_cgb);
     if (action == "--discheck") return run_discheck(files, force_cgb, max_cycles);
+    if (action == "--trace")
+        return run_trace_mode(files[0], force_cgb, trace_file, trace_limit,
+                              max_cycles, ly_stub, !quiet);
     if (action == "--debug") {
         retroemu::GameBoy gb;
         std::string error;

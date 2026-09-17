@@ -1,0 +1,9 @@
+8798F2A5052930C3  roms/acid2/cgb-acid2.gbc
+D1B9E1B53CDD73B1  roms/acid2/dmg-acid2.gb
+635C8848BE514536  roms/mooneye/acceptance/div_timing.gb
+AE75D345053A49E2  roms/mooneye/acceptance/intr_timing.gb
+E8E5250C89B4F604  roms/mooneye/acceptance/oam_dma/basic.gb
+754206648F2AAC6E  roms/mooneye/mbc1/ram_64kb.gb
+A228E01F42A3A20E  roms/mooneye/mbc1/rom_512kb.gb
+360A3AA6CFC77B35  roms/mooneye/mbc2/ram.gb
+32EEE2F0266CAA52  roms/mooneye/mbc5/rom_2Mb.gb

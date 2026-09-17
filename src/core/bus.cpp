@@ -154,6 +154,7 @@ u8 Bus::dispatch_read(u16 addr) const
 
         case MemRegion::IoRegisters:
             if (addr == 0xFF0F) return static_cast<u8>(0xE0 | io_[0x0F]);
+            if (addr == 0xFF44 && ly_stub_) return 0x90;   // see Bus::set_ly_stub
             if (addr == 0xFF4F && model_ == Model::Cgb) return ppu_.vram_bank_register();
             if (addr == 0xFF70 && model_ == Model::Cgb) return svbk_;
             // Every other register is still a plain byte; steps 7, 8 and 11

@@ -55,6 +55,7 @@ Actual prerequisites: a C++17 compiler (GCC 7+ or Clang 6+), CMake 3.16+, and
 ./build/retroemu --run roms/acid2/dmg-acid2.gb     # run headless, print the link-port output
 ./build/retroemu --debug roms/acid2/dmg-acid2.gb   # interactive debugger
 ./build/retroemu --discheck roms/*/*.gb            # disassembler vs CPU
+./build/retroemu --trace roms/acid2/dmg-acid2.gb --trace-limit 20
 ./build/retroemu                      # open the window
 ./build/retroemu --scale 6            # window magnified x6
 ./build/retroemu --selftest           # check the graphics pipeline, no window
@@ -80,7 +81,7 @@ the test bundle before moving on.
 | 3 | Bus / MMU with tick-on-access | done |
 | 4 | CPU: registers, flags, instruction set | done |
 | 5 | Disassembler and debugger *(subject V.1, V.2)* | done |
-| 6 | Trace log and differential validation | todo |
+| 6 | Trace log and differential validation | done |
 | 7 | Interrupts and timer | todo |
 | 8 | PPU: state machine | todo |
 | 9 | PPU: background, window, sprites, palettes *(subject V.2)* | todo |
@@ -100,6 +101,7 @@ the test bundle before moving on.
 ./tests/run_bus_tests.sh          # step 3: dispatch and clock    (30 checks)
 ./tests/run_cpu_tests.sh          # step 4: instruction set       (102 checks + blargg)
 ./tests/run_debug_tests.sh        # step 5: disassembler, debugger (22 checks)
+./tests/run_trace_tests.sh        # step 6: tracer and fingerprints (11 checks)
 ```
 
 `run_cartridge_tests.sh` checks the parsed summary of the nine bundled ROMs
@@ -124,6 +126,46 @@ separately:
 They report their verdict through the link port rather than the screen, which
 is what makes it possible to validate the whole instruction set before any
 rendering exists.
+
+### Differential tracing
+
+A broken emulator says nothing: no exception, no message, just a white screen,
+and the mistake usually happened hundreds of thousands of instructions before
+the symptom. The technique that works is to log the complete CPU state on
+every instruction, produce the same log from an emulator known to be correct,
+and compare. The first differing line names the exact instruction that went
+wrong.
+
+```bash
+./build/retroemu --trace <rom> --trace-file mine.log --trace-limit 100000 --ly-stub
+./build/retroemu --tracediff mine.log reference.log
+```
+
+The line format is the one the community's reference logs use:
+
+```
+A:01 F:B0 B:00 C:13 D:00 E:D8 H:01 L:4D SP:FFFE PC:0100 PCMEM:00,C3,50,01
+```
+
+`--ly-stub` makes LY (0xFF44) read back as 0x90, which those reference logs
+require because they were recorded without a PPU.
+
+`--tracediff` reports the first divergence with five lines of context and
+names the register or flag that differs:
+
+```
+  first divergence at instruction 12
+        11  A:01 F:30 ... PC:4800 PCMEM:F0,44,FE,90
+        12  A:00 F:30 ... PC:4802 PCMEM:FE,90,20,FA   <- mine.log
+        12  A:90 F:30 ... PC:4802 PCMEM:FE,90,20,FA   <- reference.log
+  A      differs: 00 versus 90
+```
+
+`--tracehash` produces a fingerprint of a ROM's first instructions.
+`tests/run_trace_tests.sh` compares those against a golden file, so any
+unintended change in CPU behaviour during a later step is caught immediately.
+When a step legitimately changes them, regenerate with `--update` and read the
+diff to confirm the change was the intended one.
 
 ### The debugger
 
@@ -184,7 +226,8 @@ RetroEmu/
 │   └── debug/              debugger-side tooling
 │       ├── cpu_selftest.cpp  self-contained instruction checks
 │       ├── disassembler.cpp  bytes to text, no side effects
-│       └── debugger.cpp      terminal debugger (subject V.1, V.2)
+│       ├── debugger.cpp      terminal debugger (subject V.1, V.2)
+│       └── tracer.cpp        execution trace and differential diff
 ├── roms/                   MIT test bundle (versioned)
 ├── roms-dev/               development ROMs (gitignored)
 ├── tests/                  regression scripts and golden files

@@ -378,3 +378,56 @@ Bus and a Cpu wired together and reset consistently.
 `run_frame` and `run_seconds`. The wiring exists once. It is also where the
 DMG/CGB choice is made, which is the hook the "forcing DMG/CGB" bonus
 (Ch. VI, p.9) will need.
+
+---
+
+## D24 — The trace uses the community's reference format
+
+**Context.** Differential tracing only works if the trace can be compared
+against one produced by an emulator known to be correct.
+
+**Decision.** `--trace` emits exactly the line format the community's
+reference logs use:
+
+```
+A:01 F:B0 B:00 C:13 D:00 E:D8 H:01 L:4D SP:FFFE PC:0100 PCMEM:00,C3,50,01
+```
+
+Inventing a nicer format would have made the traces incomparable, which is the
+whole point of producing them. `PCMEM`, the four bytes at PC, is what makes a
+divergence readable without looking the address up in the ROM.
+
+`--ly-stub` makes LY read 0x90, which those reference logs require: they were
+recorded without a PPU. It is off by default and the emulator never uses it.
+
+---
+
+## D25 — Fingerprints guard against behavioural drift
+
+**Context.** The reference logs themselves could not be downloaded from this
+environment, so the comparison against them has to be run elsewhere. That left
+the project without an automated guard on CPU behaviour.
+
+**Decision.** `--tracehash` hashes the trace of a ROM's first 200000
+instructions with FNV-1a, and `tests/expected/trace_digests.txt` stores one
+digest per bundled ROM. Any change in what the CPU does moves a digest.
+
+This is regression protection, not correctness proof: it says "behaviour
+changed", not "behaviour is right". Correctness comes from blargg's suite
+(step 4) and from comparing against reference logs.
+
+Adding the timer, the PPU and the MBCs will legitimately move some digests.
+The workflow is to regenerate with `--update` and read the diff, confirming
+the change is the intended one rather than an accident.
+
+---
+
+## D26 — Tracing must not perturb the run
+
+**Context.** A trace of a run that differs from the untraced run is worse than
+no trace at all.
+
+**Decision.** `trace_line` reads memory through `Bus::peek` only, so it
+advances no clock and has no side effect (D15). The test suite verifies that
+two runs of the same ROM produce byte-identical traces, and that a traced run
+reaches the same state as an untraced one.
