@@ -51,6 +51,8 @@ Actual prerequisites: a C++17 compiler (GCC 7+ or Clang 6+), CMake 3.16+, and
 ./build/retroemu --info roms/acid2/dmg-acid2.gb    # decode one cartridge header
 ./build/retroemu --list roms/**/*.gb               # one summary line per ROM
 ./build/retroemu --memtest roms/acid2/dmg-acid2.gb # walk the memory map, check the clock
+./build/retroemu --cpucheck                        # built-in CPU self-test
+./build/retroemu --run roms/acid2/dmg-acid2.gb     # run headless, print the link-port output
 ./build/retroemu                      # open the window
 ./build/retroemu --scale 6            # window magnified x6
 ./build/retroemu --selftest           # check the graphics pipeline, no window
@@ -74,7 +76,7 @@ the test bundle before moving on.
 | 1 | CMake skeleton + SDL2 + 160x144 window | done |
 | 2 | Cartridge: ROM loading and header parsing | done |
 | 3 | Bus / MMU with tick-on-access | done |
-| 4 | CPU: registers, flags, instruction set | todo |
+| 4 | CPU: registers, flags, instruction set | done |
 | 5 | Disassembler and debugger *(subject V.1)* | todo |
 | 6 | Trace log and differential validation | todo |
 | 7 | Interrupts and timer | todo |
@@ -94,6 +96,7 @@ the test bundle before moving on.
 ```bash
 ./tests/run_cartridge_tests.sh    # step 2: header parsing        (18 checks)
 ./tests/run_bus_tests.sh          # step 3: dispatch and clock    (30 checks)
+./tests/run_cpu_tests.sh          # step 4: instruction set       (70 checks + blargg)
 ```
 
 `run_cartridge_tests.sh` checks the parsed summary of the nine bundled ROMs
@@ -106,7 +109,20 @@ rejects writes while RAM accepts them, that echo RAM mirrors correctly, and
 that the clock charges exactly 4 T-cycles per access while the two clock
 domains diverge in double-speed mode.
 
-Both scripts honour `RETROEMU_BIN` if you want to point them at another
+`run_cpu_tests.sh` runs the self-test built into the executable, then, if
+`roms-dev/` has been populated, blargg's `cpu_instrs` suite. Those ROMs are not
+committed — the subject only evaluates the MIT bundle (p.11) — so fetch them
+separately:
+
+```bash
+./tools/fetch_dev_roms.sh
+```
+
+They report their verdict through the link port rather than the screen, which
+is what makes it possible to validate the whole instruction set before any
+rendering exists.
+
+All scripts honour `RETROEMU_BIN` if you want to point them at another
 binary, for instance a sanitizer build:
 
 ```bash
@@ -132,10 +148,14 @@ RetroEmu/
 │   └── core/               emulator core (no SDL here)
 │       ├── cartridge.cpp   ROM loading and header parsing
 │       ├── bus.cpp         address dispatch and the master clock
-│       └── ppu.cpp         owns VRAM and OAM (rendering from step 9)
+│       ├── ppu.cpp         owns VRAM and OAM (rendering from step 9)
+│       └── cpu.cpp         the instruction set
+│   └── debug/              debugger-side tooling
+│       └── cpu_selftest.cpp  self-contained instruction checks
 ├── roms/                   MIT test bundle (versioned)
 ├── roms-dev/               development ROMs (gitignored)
 ├── tests/                  regression scripts and golden files
+├── tools/                  helper scripts (fetching dev ROMs)
 └── docs/
     ├── decisions.md        technical decision log
     └── step0/bitwise.cpp   hexadecimal / bitwise training ground

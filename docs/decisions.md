@@ -249,3 +249,74 @@ displays the next instruction to execute. Disassembling means reading memory.
 `Bus::peek` is `const`, advances nothing and has none. The debugger and the
 disassembler use `peek` exclusively, so inspecting the machine can never
 perturb the emulation it is inspecting.
+
+---
+
+## D16 — The CPU does not count its own cycles
+
+**Context.** Every instruction has a documented duration, and the obvious
+implementation is a table mapping opcode to cycle count.
+
+**Decision.** No such table exists. Because `Bus::read` and `Bus::write`
+already charge 4 T-cycles at the moment of each access (D8), the duration of
+an instruction falls out of what it actually does. Only *internal* cycles,
+those matching no memory access, are added explicitly with `bus.tick(4)`:
+the extra cycle of `INC BC`, of a taken branch, of `PUSH`, and so on.
+
+Consequence: a mistake in an instruction's shape shows up as a timing error
+rather than staying invisible. The self-test checks eighteen instruction
+durations against the documentation for exactly that reason.
+
+---
+
+## D17 — Opcodes are decoded by bit field, not by a 500-case switch
+
+**Context.** There are 256 one-byte opcodes plus 256 behind the 0xCB prefix.
+
+**Decision.** The opcode map is regular, so the fields are extracted:
+`x = op >> 6`, `y = (op >> 3) & 7`, `z = op & 7`. The whole 0x40-0x7F range,
+for instance, is `LD r[y], r[z]`, which collapses 64 cases into one line.
+The result is shorter, and a typo in one case cannot silently affect only one
+rare opcode.
+
+---
+
+## D18 — Interrupt dispatch belongs to step 4, the timer to step 7
+
+**Context.** The plan lists "interrupts and timer" together as step 7.
+
+**Decision.** The *mechanism* (IME, the one-instruction delay of `EI`, the
+five-machine-cycle dispatch, `RETI`, waking from `HALT`, and the halt bug) is
+part of the CPU and was implemented here. Step 7 adds the *sources*: DIV and
+TIMA, plus the precise timing the mooneye acceptance ROMs check.
+
+This is why blargg's `02-interrupts` currently reports "Timer doesn't work":
+the dispatch is in place, the timer that would trigger it is not.
+
+---
+
+## D19 — Development ROMs are fetched, never committed
+
+**Context.** The bundle shipped with the subject contains no CPU test, but the
+subject names blargg's suite as legitimate test material (Ch. II, p.4).
+
+**Decision.** `tools/fetch_dev_roms.sh` downloads them into `roms-dev/`, which
+is gitignored. The repository keeps only the MIT bundle, which is the only ROM
+material that will be evaluated (Ch. VII, p.11). The test script skips the
+blargg layer cleanly when `roms-dev/` is absent, so a fresh clone still runs
+its checks.
+
+The CPU self-test compiled into the executable exists for the same reason: the
+instruction set must remain verifiable with no external file at all.
+
+---
+
+## D20 — The link port is captured, not emulated
+
+**Context.** The subject never mentions the serial port or a link cable, so
+none is required.
+
+**Decision.** Writes that start a transfer append the byte to a buffer the
+emulator exposes. That is enough for blargg's ROMs to report their results,
+which is how the entire instruction set was validated before any rendering
+existed. No cable is simulated and no partner console is modelled.

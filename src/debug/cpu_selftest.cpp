@@ -1,0 +1,468 @@
+#include "retroemu/debug/cpu_selftest.hpp"
+
+#include <cstdio>
+#include <string>
+#include <vector>
+
+#include "retroemu/core/bus.hpp"
+#include "retroemu/core/cartridge.hpp"
+#include "retroemu/core/cpu.hpp"
+
+namespace retroemu {
+namespace {
+
+// ---------------------------------------------------------------------------
+//  A machine holding nothing but the instruction under test.
+// ---------------------------------------------------------------------------
+class Bench {
+public:
+    // `code` is placed at the entry point, 0x0100.
+    bool load(const std::vector<u8> &code)
+    {
+        std::vector<u8> rom(32 * 1024, 0x00);
+        for (std::size_t i = 0; i < code.size(); ++i) rom[0x0100 + i] = code[i];
+
+        // A minimal valid header: ROM only, 32 KiB, no RAM, correct checksum.
+        rom[0x0147] = 0x00;
+        rom[0x0148] = 0x00;
+        rom[0x0149] = 0x00;
+        u8 sum = 0;
+        for (std::size_t a = 0x0134; a <= 0x014C; ++a) sum = static_cast<u8>(sum - rom[a] - 1);
+        rom[0x014D] = sum;
+
+        Cartridge   cart;
+        std::string error;
+        if (!cart.load_from_memory(std::move(rom), "<selftest>", error)) return false;
+
+        bus_.attach(std::move(cart), Model::Dmg);
+        cpu_.reset(Model::Dmg);
+        return true;
+    }
+
+    void step() { cpu_.step(bus_); }
+
+    Cpu &cpu() { return cpu_; }
+    Bus &bus() { return bus_; }
+
+    // T-cycles consumed by the last step, as charged by the bus.
+    u32 last_cycles()
+    {
+        const u64 before = bus_.clock().t_cpu();
+        cpu_.step(bus_);
+        return static_cast<u32>(bus_.clock().t_cpu() - before);
+    }
+
+private:
+    Bus bus_;
+    Cpu cpu_;
+};
+
+int failures = 0;
+int checks   = 0;
+bool verbose_ = false;
+
+void report(bool ok, const std::string &name, const std::string &detail)
+{
+    ++checks;
+    if (ok) {
+        if (verbose_) std::printf("  \033[1;32mPASS\033[0m  %s\n", name.c_str());
+        return;
+    }
+    ++failures;
+    std::printf("  \033[1;31mFAIL\033[0m  %s\n        %s\n", name.c_str(), detail.c_str());
+}
+
+std::string flags_to_text(u8 f)
+{
+    std::string s;
+    s += (f & FlagZ) ? 'Z' : '-';
+    s += (f & FlagN) ? 'N' : '-';
+    s += (f & FlagH) ? 'H' : '-';
+    s += (f & FlagC) ? 'C' : '-';
+    return s;
+}
+
+u8 text_to_flags(const char *text)
+{
+    u8 f = 0;
+    if (text[0] == 'Z') f |= FlagZ;
+    if (text[1] == 'N') f |= FlagN;
+    if (text[2] == 'H') f |= FlagH;
+    if (text[3] == 'C') f |= FlagC;
+    return f;
+}
+
+// ---------------------------------------------------------------------------
+//  ALU cases: run one opcode with A, a second operand and an incoming carry,
+//  then check A and all four flags.
+// ---------------------------------------------------------------------------
+struct AluCase {
+    const char *name;
+    u8          opcode;        // operates on B, except the immediate forms
+    u8          a_in;
+    u8          b_in;
+    bool        carry_in;
+    u8          a_out;
+    const char *flags_out;     // four characters, e.g. "--H-"
+};
+
+void run_alu_case(const AluCase &c)
+{
+    Bench bench;
+    if (!bench.load({c.opcode})) { report(false, c.name, "bench failed to build"); return; }
+
+    bench.cpu().regs().a = c.a_in;
+    bench.cpu().regs().b = c.b_in;
+    bench.cpu().regs().f = c.carry_in ? FlagC : 0;
+    bench.step();
+
+    const u8 got_a = bench.cpu().regs().a;
+    const u8 got_f = bench.cpu().regs().f;
+    const u8 want_f = text_to_flags(c.flags_out);
+
+    char detail[192];
+    std::snprintf(detail, sizeof(detail),
+                  "A=0x%02X %s   expected A=0x%02X %s   (inputs A=0x%02X B=0x%02X C=%d)",
+                  got_a, flags_to_text(got_f).c_str(),
+                  c.a_out, flags_to_text(want_f).c_str(),
+                  c.a_in, c.b_in, c.carry_in ? 1 : 0);
+
+    report(got_a == c.a_out && got_f == want_f, c.name, detail);
+}
+
+void check_u16(const char *name, u16 got, u16 want)
+{
+    char detail[128];
+    std::snprintf(detail, sizeof(detail), "got 0x%04X, expected 0x%04X", got, want);
+    report(got == want, name, detail);
+}
+
+void check_u8(const char *name, u8 got, u8 want)
+{
+    char detail[128];
+    std::snprintf(detail, sizeof(detail), "got 0x%02X, expected 0x%02X", got, want);
+    report(got == want, name, detail);
+}
+
+void check_flags(const char *name, u8 got, const char *want_text)
+{
+    const u8 want = text_to_flags(want_text);
+    char detail[128];
+    std::snprintf(detail, sizeof(detail), "flags %s, expected %s",
+                  flags_to_text(got).c_str(), flags_to_text(want).c_str());
+    report(got == want, name, detail);
+}
+
+void check_cycles(const char *name, u32 got, u32 want)
+{
+    char detail[128];
+    std::snprintf(detail, sizeof(detail), "took %u T-cycles, expected %u", got, want);
+    report(got == want, name, detail);
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+int run_cpu_selftest(bool verbose)
+{
+    verbose_ = verbose;
+    failures = 0;
+    checks   = 0;
+
+    // === Arithmetic and the half-carry =====================================
+    if (verbose) std::printf("\n== arithmetic and the half-carry ==\n");
+    const AluCase alu_cases[] = {
+        // ADD A,B  (0x80)
+        {"ADD A,B  half-carry only",      0x80, 0x0F, 0x01, false, 0x10, "--H-"},
+        {"ADD A,B  zero, half and carry", 0x80, 0xFF, 0x01, false, 0x00, "Z-HC"},
+        {"ADD A,B  carry without half",   0x80, 0xF0, 0x10, false, 0x00, "Z--C"},
+        {"ADD A,B  no flag at all",       0x80, 0x3A, 0x05, false, 0x3F, "----"},
+        {"ADD A,B  ignores incoming C",   0x80, 0x00, 0x00, true,  0x00, "Z---"},
+        // ADC A,B  (0x88)
+        {"ADC A,B  adds the carry in",    0x88, 0x0E, 0x01, true,  0x10, "--H-"},
+        {"ADC A,B  carry makes it wrap",  0x88, 0xFF, 0x00, true,  0x00, "Z-HC"},
+        // SUB B    (0x90)
+        {"SUB B    borrow from nothing",  0x90, 0x00, 0x01, false, 0xFF, "-NHC"},
+        {"SUB B    exact zero",           0x90, 0x10, 0x10, false, 0x00, "ZN--"},
+        {"SUB B    half-borrow only",     0x90, 0x10, 0x01, false, 0x0F, "-NH-"},
+        // SBC A,B  (0x98)
+        {"SBC A,B  subtracts the carry",  0x98, 0x10, 0x00, true,  0x0F, "-NH-"},
+        {"SBC A,B  full borrow",          0x98, 0x00, 0x00, true,  0xFF, "-NHC"},
+        // Logic
+        {"AND B    sets H, clears C",     0xA0, 0xF0, 0x0F, true,  0x00, "Z-H-"},
+        {"AND B    non-zero result",      0xA0, 0x3C, 0x0F, false, 0x0C, "--H-"},
+        {"XOR B    clears every flag",    0xA8, 0xFF, 0xFF, true,  0x00, "Z---"},
+        {"OR  B    clears every flag",    0xB0, 0xF0, 0x0F, true,  0xFF, "----"},
+        // CP       (0xB8): a subtraction that keeps A
+        {"CP  B    leaves A alone",       0xB8, 0x10, 0x20, false, 0x10, "-N-C"},
+        {"CP  B    equal means zero",     0xB8, 0x42, 0x42, false, 0x42, "ZN--"},
+    };
+    for (const AluCase &c : alu_cases) run_alu_case(c);
+
+    // === INC and DEC leave the carry flag untouched =========================
+    if (verbose) std::printf("\n== INC / DEC preserve the carry ==\n");
+    {
+        Bench b;
+        b.load({0x04});                       // INC B
+        b.cpu().regs().b = 0x0F;
+        b.cpu().regs().f = FlagC;             // carry set on the way in
+        b.step();
+        check_u8("INC B  0x0F -> 0x10", b.cpu().regs().b, 0x10);
+        check_flags("INC B  keeps the carry", b.cpu().regs().f, "--HC");
+    }
+    {
+        Bench b;
+        b.load({0x05});                       // DEC B
+        b.cpu().regs().b = 0x00;
+        b.cpu().regs().f = 0;
+        b.step();
+        check_u8("DEC B  0x00 -> 0xFF", b.cpu().regs().b, 0xFF);
+        check_flags("DEC B  sets N and H", b.cpu().regs().f, "-NH-");
+    }
+
+    // === 16-bit arithmetic: the half-carry moves to bit 11 ==================
+    if (verbose) std::printf("\n== 16-bit arithmetic ==\n");
+    {
+        Bench b;
+        b.load({0x09});                       // ADD HL,BC
+        b.cpu().regs().set_hl(0x0FFF);
+        b.cpu().regs().set_bc(0x0001);
+        b.cpu().regs().f = FlagZ;             // Z must survive untouched
+        b.step();
+        check_u16("ADD HL,BC  0x0FFF + 1", b.cpu().regs().hl(), 0x1000);
+        check_flags("ADD HL,BC  H at bit 11, Z untouched", b.cpu().regs().f, "Z-H-");
+    }
+    {
+        Bench b;
+        b.load({0xE8, 0x01});                 // ADD SP,+1
+        b.cpu().regs().sp = 0x000F;
+        b.step();
+        check_u16("ADD SP,+1", b.cpu().regs().sp, 0x0010);
+        check_flags("ADD SP,e8  flags come from the low byte", b.cpu().regs().f, "--H-");
+    }
+    {
+        Bench b;
+        b.load({0xF8, 0xFF});                 // LD HL,SP-1
+        b.cpu().regs().sp = 0x0000;
+        b.step();
+        check_u16("LD HL,SP-1  wraps around", b.cpu().regs().hl(), 0xFFFF);
+    }
+
+    // === DAA, the instruction that reads N and H ============================
+    if (verbose) std::printf("\n== DAA ==\n");
+    {
+        Bench b;
+        b.load({0x80, 0x27});                 // ADD A,B then DAA
+        b.cpu().regs().a = 0x09;
+        b.cpu().regs().b = 0x08;              // 9 + 8 = 17 in decimal
+        b.step();                             // A = 0x11, H set
+        b.step();                             // DAA -> 0x17
+        check_u8("DAA after ADD  9 + 8 = 17", b.cpu().regs().a, 0x17);
+    }
+    {
+        Bench b;
+        b.load({0x90, 0x27});                 // SUB B then DAA
+        b.cpu().regs().a = 0x10;
+        b.cpu().regs().b = 0x01;              // 10 - 1 = 9 in decimal
+        b.step();
+        b.step();
+        check_u8("DAA after SUB  10 - 1 = 09", b.cpu().regs().a, 0x09);
+    }
+
+    // === Rotates: the one-byte forms always clear Z =========================
+    if (verbose) std::printf("\n== rotates and shifts ==\n");
+    {
+        Bench b;
+        b.load({0x07});                       // RLCA
+        b.cpu().regs().a = 0x00;
+        b.step();
+        check_flags("RLCA clears Z even on a zero result", b.cpu().regs().f, "----");
+    }
+    {
+        Bench b;
+        b.load({0xCB, 0x07});                 // RLC A
+        b.cpu().regs().a = 0x00;
+        b.step();
+        check_flags("RLC A sets Z on a zero result", b.cpu().regs().f, "Z---");
+    }
+    {
+        Bench b;
+        b.load({0xCB, 0x20});                 // SLA B  (y=4 SLA, z=0 B)
+        b.cpu().regs().b = 0x80;
+        b.step();
+        check_u8("SLA B  0x80 -> 0x00", b.cpu().regs().b, 0x00);
+        check_flags("SLA B  shifts bit 7 into the carry", b.cpu().regs().f, "Z--C");
+    }
+    {
+        Bench b;
+        b.load({0xCB, 0x28});                 // SRA B: arithmetic, keeps bit 7
+        b.cpu().regs().b = 0x81;
+        b.step();
+        check_u8("SRA B  keeps bit 7", b.cpu().regs().b, 0xC0);
+    }
+    {
+        Bench b;
+        b.load({0xCB, 0x38});                 // SRL B: logical, clears bit 7
+        b.cpu().regs().b = 0x81;
+        b.step();
+        check_u8("SRL B  clears bit 7", b.cpu().regs().b, 0x40);
+    }
+    {
+        Bench b;
+        b.load({0xCB, 0x30});                 // SWAP B
+        b.cpu().regs().b = 0xAB;
+        b.step();
+        check_u8("SWAP B  swaps the nibbles", b.cpu().regs().b, 0xBA);
+    }
+    {
+        Bench b;
+        b.load({0xCB, 0x40});                 // BIT 0,B
+        b.cpu().regs().b = 0x01;
+        b.cpu().regs().f = FlagC;
+        b.step();
+        check_flags("BIT leaves the carry alone", b.cpu().regs().f, "--HC");
+    }
+
+    // === F has no low nibble ================================================
+    if (verbose) std::printf("\n== the F register ==\n");
+    {
+        Bench b;
+        b.load({0xF1});                       // POP AF
+        b.cpu().regs().sp = 0xC000;
+        b.bus().write(0xC000, 0xFF);          // try to push junk into F
+        b.bus().write(0xC001, 0x12);
+        b.step();
+        check_u8("POP AF  discards the low nibble of F", b.cpu().regs().f, 0xF0);
+        check_u8("POP AF  loads A", b.cpu().regs().a, 0x12);
+    }
+
+    // === Control flow ======================================================
+    if (verbose) std::printf("\n== control flow ==\n");
+    {
+        Bench b;
+        b.load({0x18, 0xFE});                 // JR -2: the classic infinite loop
+        b.step();
+        check_u16("JR -2 jumps backwards onto itself", b.cpu().regs().pc, 0x0100);
+    }
+    {
+        Bench b;
+        b.load({0xC7});                       // RST 00
+        b.cpu().regs().sp = 0xC002;
+        b.step();
+        check_u16("RST 00 jumps to 0x0000", b.cpu().regs().pc, 0x0000);
+        check_u16("RST 00 pushes the return address",
+                  static_cast<u16>((b.bus().peek(0xC001) << 8) | b.bus().peek(0xC000)), 0x0101);
+    }
+    {
+        Bench b;
+        b.load({0xCD, 0x34, 0x12});           // CALL 0x1234
+        b.cpu().regs().sp = 0xC002;
+        b.step();
+        check_u16("CALL jumps to the target", b.cpu().regs().pc, 0x1234);
+        check_u16("CALL pushes the address after it",
+                  static_cast<u16>((b.bus().peek(0xC001) << 8) | b.bus().peek(0xC000)), 0x0103);
+    }
+
+    // === Timing, as charged by the bus (decision D8) ========================
+    if (verbose) std::printf("\n== instruction timing ==\n");
+    {
+        Bench b; b.load({0x00});              check_cycles("NOP", b.last_cycles(), 4); }
+    {
+        Bench b; b.load({0x06, 0x42});        check_cycles("LD B,n", b.last_cycles(), 8); }
+    {
+        Bench b; b.load({0x01, 0x34, 0x12});  check_cycles("LD BC,nn", b.last_cycles(), 12); }
+    {
+        Bench b; b.load({0x03});              check_cycles("INC BC (internal cycle)", b.last_cycles(), 8); }
+    {
+        Bench b; b.load({0x34});              b.cpu().regs().set_hl(0xC000);
+        check_cycles("INC (HL)", b.last_cycles(), 12); }
+    {
+        Bench b; b.load({0x18, 0x00});        check_cycles("JR taken", b.last_cycles(), 12); }
+    {
+        Bench b; b.load({0x20, 0x00});        b.cpu().regs().f = FlagZ;
+        check_cycles("JR NZ not taken", b.last_cycles(), 8); }
+    {
+        Bench b; b.load({0xC3, 0x00, 0x01});  check_cycles("JP nn", b.last_cycles(), 16); }
+    {
+        Bench b; b.load({0xCD, 0x00, 0x01});  b.cpu().regs().sp = 0xC002;
+        check_cycles("CALL nn", b.last_cycles(), 24); }
+    {
+        Bench b; b.load({0xC9});              b.cpu().regs().sp = 0xC000;
+        check_cycles("RET", b.last_cycles(), 16); }
+    {
+        Bench b; b.load({0xC0});              b.cpu().regs().sp = 0xC000; b.cpu().regs().f = FlagZ;
+        check_cycles("RET NZ not taken", b.last_cycles(), 8); }
+    {
+        Bench b; b.load({0xC5});              b.cpu().regs().sp = 0xC002;
+        check_cycles("PUSH BC", b.last_cycles(), 16); }
+    {
+        Bench b; b.load({0xC1});              b.cpu().regs().sp = 0xC000;
+        check_cycles("POP BC", b.last_cycles(), 12); }
+    {
+        Bench b; b.load({0xE8, 0x01});        check_cycles("ADD SP,e8", b.last_cycles(), 16); }
+    {
+        Bench b; b.load({0xF8, 0x01});        check_cycles("LD HL,SP+e8", b.last_cycles(), 12); }
+    {
+        Bench b; b.load({0xCB, 0x40});        check_cycles("BIT 0,B", b.last_cycles(), 8); }
+    {
+        Bench b; b.load({0xCB, 0x46});        b.cpu().regs().set_hl(0xC000);
+        check_cycles("BIT 0,(HL) reads only", b.last_cycles(), 12); }
+    {
+        Bench b; b.load({0xCB, 0x86});        b.cpu().regs().set_hl(0xC000);
+        check_cycles("RES 0,(HL) reads and writes", b.last_cycles(), 16); }
+
+    // === Interrupts ========================================================
+    if (verbose) std::printf("\n== interrupts ==\n");
+    {
+        Bench b;
+        b.load({0xFB, 0x00, 0x00});           // EI ; NOP ; NOP
+        b.step();                             // EI itself
+        report(!b.cpu().ime(), "EI does not take effect immediately", "IME was already set");
+        b.step();                             // the instruction after EI
+        report(b.cpu().ime(), "EI takes effect one instruction later", "IME never got set");
+    }
+    {
+        Bench b;
+        b.load({0xFB, 0x00, 0x00});
+        b.bus().write(0xFFFF, IntVBlank);     // enable VBlank
+        b.bus().request_interrupt(IntVBlank);
+        b.step();                             // EI
+        b.step();                             // NOP, IME becomes set afterwards
+        const u32 cycles = b.last_cycles();   // this step services the interrupt
+        check_u16("an interrupt jumps to its vector", b.cpu().regs().pc, 0x0040);
+        check_cycles("dispatch costs 5 machine cycles", cycles, 20);
+        report(!b.cpu().ime(), "dispatch clears IME", "IME was still set");
+    }
+    {
+        Bench b;
+        b.load({0x76, 0x00});                 // HALT
+        b.bus().write(0xFFFF, IntVBlank);
+        b.bus().set_interrupt_flags(0);       // IF reads 0xE1 after boot: clear it,
+                                              // otherwise HALT hits the halt bug below
+        b.step();
+        report(b.cpu().halted(), "HALT stops the CPU", "the CPU did not halt");
+        b.bus().request_interrupt(IntVBlank);
+        b.step();
+        report(!b.cpu().halted(), "a pending interrupt wakes HALT even with IME clear",
+               "the CPU stayed halted");
+    }
+    {
+        // The halt bug: with IME clear and an interrupt ALREADY pending, HALT
+        // does not stop the CPU at all.
+        Bench b;
+        b.load({0x76, 0x3C});                 // HALT ; INC A
+        b.bus().write(0xFFFF, IntVBlank);
+        b.bus().request_interrupt(IntVBlank); // pending before HALT runs
+        b.step();
+        report(!b.cpu().halted(), "HALT does not stop when an interrupt is already pending",
+               "the CPU halted anyway");
+    }
+
+    std::printf("\n");
+    if (failures == 0) std::printf("\033[1;32m%d checks passed, 0 failed\033[0m\n", checks);
+    else               std::printf("\033[1;31m%d checks passed, %d failed\033[0m\n",
+                                   checks - failures, failures);
+    return failures;
+}
+
+}  // namespace retroemu

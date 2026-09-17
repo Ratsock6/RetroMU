@@ -59,6 +59,16 @@ enum class MemRegion {
 const char *to_string(MemRegion region);
 MemRegion   region_of(u16 addr);
 
+// --- Interrupt sources, in dispatch priority order -------------------------
+//  The bit position is also the vector: vector = 0x40 + bit * 8.
+enum Interrupt : u8 {
+    IntVBlank = 0x01,   // vector 0x40
+    IntStat   = 0x02,   // vector 0x48
+    IntTimer  = 0x04,   // vector 0x50
+    IntSerial = 0x08,   // vector 0x58
+    IntJoypad = 0x10,   // vector 0x60
+};
+
 // Work RAM: 8 KiB on DMG, 32 KiB on CGB in eight 4 KiB banks (SVBK, 0xFF70).
 inline constexpr std::size_t kWramBankSize = 4 * 1024;
 inline constexpr std::size_t kWramBanks    = 8;
@@ -95,6 +105,20 @@ public:
     // Number of ticking accesses performed, for tests and the debugger.
     u64 access_count() const { return access_count_; }
 
+    // --- Interrupts --------------------------------------------------------
+    //  IE lives at 0xFFFF, IF at 0xFF0F. The CPU reads both every step.
+    u8   interrupt_enable() const { return interrupt_enable_; }
+    u8   interrupt_flags() const  { return static_cast<u8>(0xE0 | io_[0x0F]); }
+    void set_interrupt_flags(u8 value) { io_[0x0F] = static_cast<u8>(value & 0x1F); }
+    void request_interrupt(Interrupt which) { io_[0x0F] |= static_cast<u8>(which & 0x1F); }
+
+    // --- Serial port -------------------------------------------------------
+    //  Not required by the subject (no link cable is mentioned anywhere), but
+    //  blargg's test ROMs report their results through it, which is how the
+    //  CPU can be validated before any screen exists.
+    const std::string &serial_output() const { return serial_; }
+    void clear_serial_output() { serial_.clear(); }
+
     Ppu             &ppu()       { return ppu_; }
     const Ppu       &ppu() const { return ppu_; }
     Cartridge       &cartridge()       { return cartridge_; }
@@ -120,6 +144,8 @@ private:
     // owner as the peripherals are implemented (timer in step 7, PPU
     // registers in step 8, joypad in step 11).
     std::array<u8, 0x80> io_{};
+
+    std::string serial_;         // everything the game sent over the link port
 
     u8  interrupt_enable_ = 0;   // 0xFFFF
     u8  svbk_             = 1;   // 0xFF70, CGB WRAM bank select

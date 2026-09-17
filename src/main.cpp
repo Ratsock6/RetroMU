@@ -19,9 +19,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 #include "retroemu/core/bus.hpp"
 #include "retroemu/core/cartridge.hpp"
+#include "retroemu/core/cpu.hpp"
+#include "retroemu/debug/cpu_selftest.hpp"
 #include "retroemu/core/types.hpp"
 
 namespace {
@@ -356,9 +359,9 @@ void print_cartridge_row(const retroemu::Cartridge &cart)
 }
 
 // Shared driver for --info and --list. Returns a process exit code.
-int run_cartridge_report(char *argv[], int first, int argc, bool compact)
+int run_cartridge_report(const std::vector<std::string> &paths, bool compact)
 {
-    if (first >= argc) {
+    if (paths.empty()) {
         std::fprintf(stderr, "expected at least one ROM file\n");
         return 1;
     }
@@ -366,12 +369,12 @@ int run_cartridge_report(char *argv[], int first, int argc, bool compact)
     int failures = 0;
     if (compact) print_list_header();
 
-    for (int i = first; i < argc; ++i) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
         retroemu::Cartridge cart;
         std::string error;
 
-        if (!cart.load_from_file(argv[i], error)) {
-            std::fprintf(stderr, "%s: %s\n", argv[i], error.c_str());
+        if (!cart.load_from_file(paths[i], error)) {
+            std::fprintf(stderr, "%s: %s\n", paths[i].c_str(), error.c_str());
             ++failures;
             continue;
         }
@@ -379,7 +382,7 @@ int run_cartridge_report(char *argv[], int first, int argc, bool compact)
         if (compact) {
             print_cartridge_row(cart);
         } else {
-            if (i > first) std::printf("\n%s\n\n", std::string(60, '-').c_str());
+            if (i > 0) std::printf("\n%s\n\n", std::string(60, '-').c_str());
             print_cartridge_info(cart);
         }
     }
@@ -512,6 +515,87 @@ int run_memtest(const char *rom_path, bool force_cgb)
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+//  Headless execution (step 4).
+// ---------------------------------------------------------------------------
+//  Runs a ROM with no window at all and prints whatever the game sends over
+//  the link port. blargg's CPU tests report through that port, which is how
+//  the instruction set can be validated before any screen exists.
+// ---------------------------------------------------------------------------
+int run_rom(const char *rom_path, bool force_cgb, retroemu::u64 max_cycles, bool verbose)
+{
+    retroemu::Cartridge cart;
+    std::string error;
+    if (!cart.load_from_file(rom_path, error)) {
+        std::fprintf(stderr, "%s: %s\n", rom_path, error.c_str());
+        return 1;
+    }
+
+    const bool cgb_cart = cart.header().cgb != retroemu::CgbSupport::None;
+    const retroemu::Model model =
+        (force_cgb || cart.header().cgb == retroemu::CgbSupport::Only)
+            ? retroemu::Model::Cgb : retroemu::Model::Dmg;
+    (void)cgb_cart;
+
+    retroemu::Bus bus;
+    bus.attach(std::move(cart), model);
+    retroemu::Cpu cpu;
+    cpu.reset(model);
+
+    if (verbose) {
+        std::printf("Running %s in %s mode, up to %llu cycles\n\n",
+                    rom_path, bus.model_name(),
+                    static_cast<unsigned long long>(max_cycles));
+    }
+
+    std::size_t printed = 0;
+    retroemu::u64 instructions = 0;
+
+    while (bus.clock().t_cpu() < max_cycles) {
+        cpu.step(bus);
+        ++instructions;
+
+        // Echo serial output as it appears, so a hanging test still shows
+        // how far it got.
+        const std::string &out = bus.serial_output();
+        while (printed < out.size()) std::fputc(out[printed++], stdout);
+        std::fflush(stdout);
+
+        // blargg's runtime prints a verdict when the test ends; there is no
+        // point burning the rest of the cycle budget after that.
+        if (out.size() >= 6) {
+            const std::size_t tail = out.size() < 64 ? 0 : out.size() - 64;
+            const std::string end  = out.substr(tail);
+            if (end.find("Passed") != std::string::npos ||
+                end.find("Failed") != std::string::npos) break;
+        }
+
+        if (cpu.illegal()) {
+            std::fprintf(stderr, "\nillegal opcode 0x%02X at PC=0x%04X\n",
+                         cpu.illegal_opcode(), cpu.regs().pc);
+            return 1;
+        }
+        if (cpu.stopped()) break;
+    }
+
+    const std::string &out = bus.serial_output();
+
+    if (verbose) {
+        std::printf("\n\n");
+        std::printf("instructions executed : %llu\n", static_cast<unsigned long long>(instructions));
+        std::printf("T-cycles elapsed      : %llu\n", static_cast<unsigned long long>(bus.clock().t_cpu()));
+        std::printf("emulated time         : %.2f s\n",
+                    static_cast<double>(bus.clock().t_cpu()) / retroemu::kSystemClockHz);
+        std::printf("final PC              : 0x%04X\n", cpu.regs().pc);
+        std::printf("serial bytes received : %zu\n", out.size());
+    }
+
+    // blargg's runtime prints "Passed" or "Failed" when a test completes.
+    if (out.find("Passed") != std::string::npos) return 0;
+    if (out.find("Failed") != std::string::npos) return 2;
+    return 3;   // no verdict: the ROM never finished
+}
+
 void print_usage(const char *prog)
 {
     std::printf(
@@ -523,6 +607,10 @@ void print_usage(const char *prog)
         "  --info <rom>...        print the cartridge header of each ROM\n"
         "  --list <rom>...        print one summary line per ROM\n"
         "  --memtest <rom>        walk the memory map and check the clock\n"
+        "  --run <rom>            run headless, print the serial output\n"
+        "  --max-cycles N         cycle budget for --run (default 250000000)\n"
+        "  --quiet                with --run, print only the serial output\n"
+        "  --cpucheck             run the built-in CPU self-test\n"
         "  --cgb                  force CGB mode (used with --memtest)\n"
         "  --selftest [file.ppm]  check the graphics pipeline without a window\n"
         "  --scale N              window magnification factor (default: 4)\n"
@@ -535,46 +623,27 @@ void print_usage(const char *prog)
 
 int main(int argc, char *argv[])
 {
-    int  scale     = 4;
-    bool force_cgb = false;
+    // Options are collected first and the action is executed afterwards, so
+    // that flags work wherever they appear on the command line.
+    int           scale      = 4;
+    bool          force_cgb  = false;
+    bool          quiet      = false;
+    retroemu::u64 max_cycles = 250000000ULL;   // about 60 emulated seconds
+
+    std::string              action;
+    std::vector<std::string> files;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
 
-        if (arg == "--help" || arg == "-h") {
-            print_usage(argv[0]);
-            return 0;
-        }
-        if (arg == "--version") {
-            std::printf("RetroEmu %s\n", kVersion);
-            return 0;
-        }
-        if (arg == "--selftest") {
-            const char *ppm = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : nullptr;
-            return run_selftest(ppm);
-        }
-        if (arg == "--info") {
-            return run_cartridge_report(argv, i + 1, argc, /*compact=*/false);
-        }
-        if (arg == "--list") {
-            return run_cartridge_report(argv, i + 1, argc, /*compact=*/true);
-        }
-        if (arg == "--memtest") {
-            if (i + 1 >= argc) {
-                std::fprintf(stderr, "--memtest expects a ROM file\n");
-                return 1;
-            }
-            return run_memtest(argv[i + 1], force_cgb);
-        }
-        if (arg == "--cgb") {
-            force_cgb = true;
-            continue;
-        }
+        if (arg == "--help" || arg == "-h") { print_usage(argv[0]); return 0; }
+        if (arg == "--version") { std::printf("RetroEmu %s\n", kVersion); return 0; }
+
+        if (arg == "--cgb")   { force_cgb = true; continue; }
+        if (arg == "--quiet") { quiet = true; continue; }
+
         if (arg == "--scale") {
-            if (i + 1 >= argc) {
-                std::fprintf(stderr, "--scale expects a number\n");
-                return 1;
-            }
+            if (i + 1 >= argc) { std::fprintf(stderr, "--scale expects a number\n"); return 1; }
             scale = std::atoi(argv[++i]);
             if (scale < 1 || scale > 16) {
                 std::fprintf(stderr, "--scale must be between 1 and 16\n");
@@ -582,10 +651,46 @@ int main(int argc, char *argv[])
             }
             continue;
         }
-        std::fprintf(stderr, "Unknown option: %s\n", arg.c_str());
-        print_usage(argv[0]);
-        return 1;
+        if (arg == "--max-cycles") {
+            if (i + 1 >= argc) { std::fprintf(stderr, "--max-cycles expects a number\n"); return 1; }
+            max_cycles = std::strtoull(argv[++i], nullptr, 10);
+            if (max_cycles == 0) {
+                std::fprintf(stderr, "--max-cycles must be greater than zero\n");
+                return 1;
+            }
+            continue;
+        }
+
+        if (arg == "--selftest" || arg == "--info" || arg == "--list" ||
+            arg == "--memtest"  || arg == "--run"  || arg == "--cpucheck") {
+            if (!action.empty()) {
+                std::fprintf(stderr, "%s and %s cannot be combined\n",
+                             action.c_str(), arg.c_str());
+                return 1;
+            }
+            action = arg;
+            continue;
+        }
+
+        if (arg.rfind("--", 0) == 0) {
+            std::fprintf(stderr, "Unknown option: %s\n", arg.c_str());
+            print_usage(argv[0]);
+            return 1;
+        }
+        files.push_back(arg);
     }
 
-    return run_window(scale);
+    if (action.empty())        return run_window(scale);
+    if (action == "--selftest") return run_selftest(files.empty() ? nullptr : files[0].c_str());
+    if (action == "--info")     return run_cartridge_report(files, /*compact=*/false);
+    if (action == "--list")     return run_cartridge_report(files, /*compact=*/true);
+    if (action == "--cpucheck") return retroemu::run_cpu_selftest(!quiet) == 0 ? 0 : 1;
+
+    // The remaining actions take exactly one ROM.
+    if (files.empty()) {
+        std::fprintf(stderr, "%s expects a ROM file\n", action.c_str());
+        return 1;
+    }
+    if (action == "--memtest") return run_memtest(files[0].c_str(), force_cgb);
+    return run_rom(files[0].c_str(), force_cgb, max_cycles, !quiet);
 }

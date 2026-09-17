@@ -118,6 +118,10 @@ public:
     // Returns false and fills `error` on failure. The object is left empty.
     bool load_from_file(const std::string &path, std::string &error);
 
+    // Same, from bytes already in memory. Used by the built-in CPU self-test,
+    // which must run without any external ROM file.
+    bool load_from_memory(std::vector<u8> rom, const std::string &name, std::string &error);
+
     // --- Access from the bus ------------------------------------------------
     //  Handles 0x0000-0x7FFF (ROM) and 0xA000-0xBFFF (external RAM).
     //

@@ -48,6 +48,8 @@ add_executable(retroemu
     src/main.cpp
     src/core/cartridge.cpp
     src/core/bus.cpp
+    src/core/cpu.cpp
+    src/debug/cpu_selftest.cpp
     src/core/ppu.cpp
 )
 

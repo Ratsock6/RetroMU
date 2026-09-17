@@ -365,6 +365,21 @@ bool Cartridge::load_from_file(const std::string &path, std::string &error)
     return true;
 }
 
+bool Cartridge::load_from_memory(std::vector<u8> rom, const std::string &name, std::string &error)
+{
+    path_   = name;
+    rom_    = std::move(rom);
+    header_ = CartridgeHeader{};
+
+    if (!parse_header(rom_, header_, error)) {
+        rom_.clear();
+        return false;
+    }
+    ram_.assign(header_.ram_size, 0xFF);
+    bank_commands_ = 0;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 //  Access from the bus
 // ---------------------------------------------------------------------------
