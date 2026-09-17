@@ -55,6 +55,7 @@ void Bus::reset()
     ppu_.reset(model_);
     timer_.reset(model_);
     dma_.reset();
+    joypad_.reset();
     clock_.reset();
     wram_.fill(0);
     hram_.fill(0);
@@ -66,7 +67,6 @@ void Bus::reset()
 
     // Values the real boot ROM leaves in the I/O registers. The mandatory part
     // skips the boot sequence (ambiguity A3), so they are applied directly.
-    io_[0x00] = 0xCF;   // JOYP: nothing pressed
     io_[0x02] = 0x7E;   // SC
     io_[0x0F] = 0xE1;   // IF
 }
@@ -137,6 +137,8 @@ void Bus::tick(u32 t)
     // The copier moves one byte per machine cycle of the CPU clock, so it too
     // runs twice as fast in CGB double-speed mode.
     dma_.tick(*this, t);
+
+    if (joypad_.take_irq()) request_interrupt(IntJoypad);
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +180,7 @@ u8 Bus::dispatch_read(u16 addr) const
             // PPU answers first and the stub becomes dead code.
             if (addr == 0xFF44 && ly_stub_) return 0x90;   // see Bus::set_ly_stub
             if (addr >= 0xFF04 && addr <= 0xFF07) return timer_.read(addr);
+            if (addr == 0xFF00) return joypad_.read();
             if (addr == kOamDmaRegister) return dma_.source_page();
             if (addr >= 0xFF40 && addr <= 0xFF4B) return ppu_.read(addr);
             if (addr == 0xFF0F) return static_cast<u8>(0xE0 | io_[0x0F]);
@@ -236,6 +239,7 @@ void Bus::dispatch_write(u16 addr, u8 value)
 
         case MemRegion::IoRegisters:
             if (addr >= 0xFF04 && addr <= 0xFF07) { timer_.write(addr, value); return; }
+            if (addr == 0xFF00) { joypad_.write(value); return; }
             if (addr == kOamDmaRegister) { dma_.start(value); return; }
             if (addr >= 0xFF40 && addr <= 0xFF4B) { ppu_.write(addr, value); return; }
             if (addr == 0xFF01) { io_[0x01] = value; return; }        // SB: byte to send

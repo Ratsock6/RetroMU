@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "retroemu/core/joypad.hpp"
 #include "retroemu/debug/disassembler.hpp"
 
 namespace retroemu {
@@ -101,6 +102,8 @@ void print_help()
         "  bd <addr>         delete a breakpoint\n"
         "  m <addr> [n]      dump n bytes of memory (default 64)\n"
         "  w <addr> <value>  write a byte without advancing the clock\n"
+        "  k <button> [0|1]  press or release a button; with no value, show them\n"
+        "                    (up down left right a b start select)\n"
         "  i                 machine state: clocks, frames, link port\n"
         "  reset             reset the machine\n"
         "  h                 this help\n"
@@ -280,6 +283,36 @@ int run_debugger(GameBoy &gb)
             if (!has1 || !has2) { std::printf("  usage: w <addr> <value>\n"); continue; }
             gb.bus().poke(static_cast<u16>(arg1), static_cast<u8>(arg2));
             std::printf("  $%04X = %02X\n", static_cast<u16>(arg1), static_cast<u8>(arg2));
+            continue;
+        }
+
+        // Section V.4 of the subject: the control pad and the four action
+        // buttons. Driving them from here means the input path can be tested
+        // without a window, and without a human.
+        if (cmd == "k" || cmd == "key") {
+            Joypad &pad = gb.bus().joypad();
+            if (words.size() < 2) {
+                std::printf("  JOYP reads $%02X\n", gb.bus().peek(0xFF00));
+                const Button all[] = {ButtonUp, ButtonDown, ButtonLeft, ButtonRight,
+                                      ButtonA, ButtonB, ButtonStart, ButtonSelect};
+                std::printf("  pressed:");
+                bool any = false;
+                for (Button b : all) {
+                    if (pad.pressed(b)) { std::printf(" %s", to_string(b)); any = true; }
+                }
+                std::printf("%s\n", any ? "" : " (none)");
+                continue;
+            }
+            Button button;
+            if (!parse_button(words[1].c_str(), button)) {
+                std::printf("  unknown button '%s'\n", words[1].c_str());
+                continue;
+            }
+            const bool down = (words.size() < 3) || (words[2] != "0");
+            pad.set(button, down);
+            std::printf("  %s %s, JOYP reads $%02X\n",
+                        to_string(button), down ? "pressed" : "released",
+                        gb.bus().peek(0xFF00));
             continue;
         }
 

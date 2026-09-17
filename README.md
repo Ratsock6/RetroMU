@@ -48,6 +48,8 @@ Actual prerequisites: a C++17 compiler (GCC 7+ or Clang 6+), CMake 3.16+, and
 ## Usage
 
 ```bash
+./build/retroemu roms/acid2/dmg-acid2.gb           # play it
+./build/retroemu roms/acid2/dmg-acid2.gb --scale 6
 ./build/retroemu --info roms/acid2/dmg-acid2.gb    # decode one cartridge header
 ./build/retroemu --list roms/**/*.gb               # one summary line per ROM
 ./build/retroemu --memtest roms/acid2/dmg-acid2.gb # walk the memory map, check the clock
@@ -89,7 +91,7 @@ the test bundle before moving on.
 | 8 | PPU: state machine | done |
 | 9 | PPU: background, window, sprites, palettes *(subject V.2)* | done |
 | 10 | OAM DMA | done |
-| 11 | Real-time loop and inputs *(subject V.3, V.4)* | todo |
+| 11 | Real-time loop and inputs *(subject V.3, V.4)* | done |
 | 12 | GUI: load / play / pause *(subject Chapter IV)* | todo |
 | 13 | MBC1, MBC2, MBC5 and battery saves *(subject V.5)* | todo |
 | 14 | CGB: palettes, VRAM bank, HDMA, double speed *(subject V.6)* | todo |
@@ -109,6 +111,7 @@ the test bundle before moving on.
 ./tests/run_ppu_tests.sh          # step 8: PPU state machine     (11 checks)
 ./tests/run_render_tests.sh       # step 9: rendering             (9 checks)
 ./tests/run_dma_tests.sh          # step 10: OAM DMA              (5 checks)
+./tests/run_input_tests.sh        # step 11: loop and inputs      (14 checks)
 ```
 
 `run_cartridge_tests.sh` checks the parsed summary of the nine bundled ROMs
@@ -133,6 +136,27 @@ separately:
 They report their verdict through the link port rather than the screen, which
 is what makes it possible to validate the whole instruction set before any
 rendering exists.
+
+### Controls
+
+| Key | Button |
+|---|---|
+| Arrow keys | Control pad |
+| `X` | A |
+| `Z` | B |
+| `Enter` | Start |
+| `Backspace` or right `Shift` | Select |
+| `Space` | Pause and resume |
+| `Escape` | Quit |
+
+The subject names the buttons but not the keys, so this mapping is a choice.
+It lives in one table at the top of `src/front/frontend.cpp`.
+
+The title bar shows the measured frame rate, which is how "normal speed"
+(subject V.3) can be checked at a glance. `--frames N` closes the window after
+N frames and reports how many arrived late, which is how the pacing is
+measured in the test suite, under SDL's dummy video driver and with no display
+attached.
 
 ### Looking at what is drawn
 
@@ -257,12 +281,14 @@ RetroEmu/
 │   └── front/              SDL2, user interface
 ├── src/
 │   ├── main.cpp            entry point and CLI
+│   ├── front/frontend.cpp  window, real-time loop, keyboard (subject V.3, V.4)
 │   └── core/               emulator core (no SDL here)
 │       ├── cartridge.cpp   ROM loading and header parsing
 │       ├── bus.cpp         address dispatch and the master clock
 │       ├── ppu.cpp         owns VRAM and OAM (rendering from step 9)
 │       ├── timer.cpp       DIV, TIMA, TMA, TAC
 │       ├── dma.cpp         the sprite table copier
+│       ├── joypad.cpp      the eight buttons (subject V.4)
 │       ├── cpu.cpp         the instruction set
 │       └── gameboy.cpp     the assembled machine
 │   └── debug/              debugger-side tooling

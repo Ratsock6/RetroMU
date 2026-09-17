@@ -29,6 +29,7 @@
 #include "retroemu/debug/debugger.hpp"
 #include "retroemu/debug/disassembler.hpp"
 #include "retroemu/debug/tracer.hpp"
+#include "retroemu/front/frontend.hpp"
 #include "retroemu/core/types.hpp"
 
 namespace {
@@ -161,91 +162,6 @@ int run_selftest(const char *ppm_path)
     SDL_GetVersion(&linked);
     std::printf("  SDL2 linked   : %d.%d.%d\n", linked.major, linked.minor, linked.patch);
     std::printf("\033[1;32m  SELFTEST OK\033[0m\n");
-    return 0;
-}
-
-// ---------------------------------------------------------------------------
-//  Graphics loop.
-// ---------------------------------------------------------------------------
-int run_window(int scale)
-{
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-        std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
-        return 1;
-    }
-
-    SDL_Window *window = SDL_CreateWindow(
-        "RetroEmu", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        kScreenWidth * scale, kScreenHeight * scale, SDL_WINDOW_SHOWN);
-    if (window == nullptr) {
-        std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
-        SDL_Quit();
-        return 1;
-    }
-
-    // No SDL_RENDERER_PRESENTVSYNC on purpose: decision D6. VSync would lock
-    // emulation to the corrector's monitor refresh rate (60 Hz) while the
-    // hardware runs at 59.727 Hz. Pacing will be driven by a high-resolution
-    // clock in step 11.
-    SDL_Renderer *renderer =
-        SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-    if (renderer == nullptr) {
-        std::fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError());
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
-
-    // Nearest-neighbour filtering: pixels must stay square and sharp.
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
-
-    // SDL_TEXTUREACCESS_STREAMING: a texture meant to be rewritten every
-    // frame, which is exactly what an emulator framebuffer is.
-    SDL_Texture *texture =
-        SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
-                          SDL_TEXTUREACCESS_STREAMING, kScreenWidth, kScreenHeight);
-    if (texture == nullptr) {
-        std::fprintf(stderr, "SDL_CreateTexture: %s\n", SDL_GetError());
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
-
-    std::printf("Window %dx%d (scale x%d). Press Escape or close to quit.\n",
-                kScreenWidth * scale, kScreenHeight * scale, scale);
-
-    Framebuffer fb{};
-    bool running = true;
-    int frame = 0;
-
-    while (running) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e) != 0) {
-            if (e.type == SDL_QUIT) {
-                running = false;
-            } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
-                running = false;
-            }
-        }
-
-        draw_test_pattern(fb, frame++);
-
-        SDL_UpdateTexture(texture, nullptr, fb.data(),
-                          kScreenWidth * static_cast<int>(sizeof(u32)));
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, texture, nullptr, nullptr);
-        SDL_RenderPresent(renderer);
-
-        // Temporary pacing. Replaced in step 11 by a high-resolution clock
-        // locked to 59.727 frames per second.
-        SDL_Delay(16);
-    }
-
-    SDL_DestroyTexture(texture);
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
     return 0;
 }
 
@@ -943,7 +859,11 @@ void print_usage(const char *prog)
     std::printf(
         "RetroEmu %s\n"
         "\n"
-        "Usage: %s [options]\n"
+        "Usage: %s [rom] [options]\n"
+        "\n"
+        "With no action, opens the window and runs the cartridge.\n"
+        "Controls: arrows, X = A, Z = B, Enter = Start, Backspace = Select,\n"
+        "          Space = pause/resume, Escape = quit\n"
         "\n"
         "Options:\n"
         "  --info <rom>...        print the cartridge header of each ROM\n"
@@ -968,6 +888,8 @@ void print_usage(const char *prog)
         "  --cgb                  force CGB mode (used with --memtest)\n"
         "  --selftest [file.ppm]  check the graphics pipeline without a window\n"
         "  --scale N              window magnification factor (default: 4)\n"
+        "  --paused               start paused\n"
+        "  --frames N             close the window after N frames\n"
         "  --version              print version and exit\n"
         "  --help                 print this help and exit\n",
         kVersion, prog);
@@ -981,7 +903,9 @@ int main(int argc, char *argv[])
     // that flags work wherever they appear on the command line.
     int           scale      = 4;
     bool          force_cgb  = false;
-    bool          quiet      = false;
+    bool          quiet        = false;
+    bool          start_paused = false;
+    retroemu::u64 frame_limit  = 0;
     retroemu::u64 max_cycles  = 250000000ULL;   // about 60 emulated seconds
     retroemu::u64 trace_limit = 1000000ULL;
     const char   *trace_file  = nullptr;
@@ -997,7 +921,13 @@ int main(int argc, char *argv[])
         if (arg == "--help" || arg == "-h") { print_usage(argv[0]); return 0; }
         if (arg == "--version") { std::printf("RetroEmu %s\n", kVersion); return 0; }
 
-        if (arg == "--cgb")   { force_cgb = true; continue; }
+        if (arg == "--cgb")    { force_cgb = true; continue; }
+        if (arg == "--paused") { start_paused = true; continue; }
+        if (arg == "--frames") {
+            if (i + 1 >= argc) { std::fprintf(stderr, "--frames expects a number\n"); return 1; }
+            frame_limit = std::strtoull(argv[++i], nullptr, 10);
+            continue;
+        }
         if (arg == "--quiet") { quiet = true; continue; }
 
         if (arg == "--scale") {
@@ -1061,7 +991,15 @@ int main(int argc, char *argv[])
         files.push_back(arg);
     }
 
-    if (action.empty())        return run_window(scale);
+    if (action.empty()) {
+        retroemu::FrontendOptions front;
+        front.rom_path     = files.empty() ? std::string() : files[0];
+        front.scale        = scale;
+        front.force_cgb    = force_cgb;
+        front.start_paused = start_paused;
+        front.frame_limit  = frame_limit;
+        return retroemu::run_frontend(front);
+    }
     if (action == "--selftest") return run_selftest(files.empty() ? nullptr : files[0].c_str());
     if (action == "--info")     return run_cartridge_report(files, /*compact=*/false);
     if (action == "--list")     return run_cartridge_report(files, /*compact=*/true);

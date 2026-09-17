@@ -682,3 +682,73 @@ matches its reference pixel for pixel with the block in place.
 unlike the PPU (D28). In CGB double-speed mode the machine cycles are shorter,
 so the transfer finishes in half the real time, which is what the hardware
 does.
+
+---
+
+## D42 — The keyboard mapping is a documented choice
+
+**Context.** Section V.4 (p.7) names the buttons but says nothing about which
+keys reach them.
+
+**Decision.** Arrow keys for the control pad, `X` for A, `Z` for B, `Enter`
+for Start, `Backspace` or right `Shift` for Select, following the layout most
+emulators use. It lives in one table at the top of `src/front/frontend.cpp`,
+so changing it is a one-place edit and the UX bonus (Ch. VI, p.9) could make
+it configurable.
+
+`Space` pauses and `Escape` quits. Those are not buttons of the console; they
+are the keyboard route to the play and pause that section IV (p.6) requires
+of the GUI, which step 12 will also expose as controls.
+
+---
+
+## D43 — Pacing by deadline, with a hybrid wait
+
+**Context.** Section V.3 (p.7) requires normal speed without degrading the
+interface. Decision D6 already ruled out VSync, which would tie emulation to
+whatever refresh rate the corrector's monitor happens to have, while the
+hardware runs at 59.727 frames per second.
+
+**Decision.** A deadline is computed from the hardware's own figures
+(70224 system cycles at 4194304 Hz) and waited for. `SDL_Delay` is coarse, a
+millisecond at best, so it covers the bulk of the wait and a short spin covers
+the tail; spinning the whole way would burn a core for nothing.
+
+When a frame finishes late the deadline restarts from the present instead of
+accumulating a debt, which would otherwise make the emulator sprint to catch
+up after any hiccup. Late frames are counted and reported.
+
+Measured: 180 frames in 3021 ms against the 3014 ms the hardware would take,
+with zero late frames.
+
+---
+
+## D44 — The renderer falls back to software
+
+**Context.** `SDL_CreateRenderer` with `SDL_RENDERER_ACCELERATED` fails
+outright when no GPU driver is available.
+
+**Decision.** Accelerated first, then software. A corrector running over SSH
+with X forwarding, inside a virtual machine, or on a system with no GPU driver
+has no accelerated renderer, and refusing to start there would be a poor
+reason to fail an evaluation. The fallback prints one line saying what
+happened.
+
+Found while trying to test the loop under SDL's dummy video driver, which
+provides no accelerated renderer either. That the test environment and a
+plausible correction environment fail the same way is the point.
+
+---
+
+## D45 — The frontend is the only place that includes SDL
+
+**Context.** Section IV (p.6) imposes SDL2 for graphics, input and audio.
+
+**Decision.** `src/front/frontend.cpp` is the only translation unit that
+includes it. Everything under `core/` produces a 160x144 buffer of colours and
+consumes eight button states, and knows nothing about how either reaches a
+human.
+
+That separation is what lets the whole emulator be tested with no window at
+all: `--screenshot`, `--mooneye`, `--cpucheck` and the debugger all drive the
+same core. The window is one more consumer, not the program.

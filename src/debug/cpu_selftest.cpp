@@ -8,6 +8,7 @@
 #include "retroemu/core/bus.hpp"
 #include "retroemu/core/cartridge.hpp"
 #include "retroemu/core/cpu.hpp"
+#include "retroemu/core/joypad.hpp"
 #include "retroemu/debug/disassembler.hpp"
 
 namespace retroemu {
@@ -729,6 +730,94 @@ int run_cpu_selftest(bool verbose)
         const u8 before = b.bus().peek(0xFF44);
         b.bus().poke(0xFF44, 0x77);
         check_u8("LY is read-only", b.bus().peek(0xFF44), before);
+    }
+
+    // === Joypad (subject V.4) ===============================================
+    //  Eight buttons through one register that shows four wires at a time.
+    //  The game clears a selection bit to choose which half it sees. The
+    //  logic is inverted throughout: a bit reads 0 when the button is DOWN.
+    if (verbose) std::printf("\n== joypad ==\n");
+    {
+        Bench b; b.load({0x00});
+        check_u8("JOYP reads 0xCF after boot", b.bus().peek(0xFF00), 0xCF);
+    }
+    {
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF00, 0x10);          // select the action buttons
+        check_u8("nothing pressed reads all ones", b.bus().peek(0xFF00), 0xDF);
+        b.bus().joypad().set(ButtonA, true);
+        check_u8("pressing A clears bit 0", b.bus().peek(0xFF00), 0xDE);
+        b.bus().joypad().set(ButtonStart, true);
+        check_u8("pressing Start clears bit 3", b.bus().peek(0xFF00), 0xD6);
+        b.bus().joypad().set(ButtonA, false);
+        check_u8("releasing A sets it back", b.bus().peek(0xFF00), 0xD7);
+    }
+    {
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF00, 0x20);          // select the control pad
+        b.bus().joypad().set(ButtonRight, true);
+        check_u8("pressing Right clears bit 0", b.bus().peek(0xFF00), 0xEE);
+        b.bus().joypad().set(ButtonDown, true);
+        check_u8("pressing Down clears bit 3", b.bus().peek(0xFF00), 0xE6);
+    }
+    {
+        // A button of the half that is NOT selected stays invisible. This is
+        // why reading all eight takes two writes and two reads.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF00, 0x10);          // action buttons selected
+        b.bus().joypad().set(ButtonRight, true);
+        check_u8("a button of the other half does not show", b.bus().peek(0xFF00), 0xDF);
+        b.bus().poke(0xFF00, 0x20);          // now the control pad
+        check_u8("and appears once its half is selected", b.bus().peek(0xFF00), 0xEE);
+    }
+    {
+        // Selecting both halves is allowed: the wires carry both, ANDed,
+        // because a pressed button in either half pulls the same wire low.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF00, 0x00);          // both halves
+        b.bus().joypad().set(ButtonA, true);       // bit 0 of the action half
+        b.bus().joypad().set(ButtonLeft, true);    // bit 1 of the pad half
+        check_u8("both halves at once are combined", b.bus().peek(0xFF00), 0xCC);
+    }
+    {
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF00, 0x30);          // neither half
+        b.bus().joypad().set(ButtonA, true);
+        b.bus().joypad().set(ButtonRight, true);
+        check_u8("with neither half selected nothing shows", b.bus().peek(0xFF00), 0xFF);
+    }
+    {
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF00, 0x00);
+        report((b.bus().peek(0xFF00) & 0xC0) == 0xC0,
+               "the two unused bits always read as 1", "bits 6 or 7 were clear");
+        b.bus().poke(0xFF00, 0xFF);
+        report((b.bus().peek(0xFF00) & 0x0F) == 0x0F,
+               "writing cannot set the button bits", "a write reached the button wires");
+    }
+    {
+        // The interrupt fires when a wire falls, so only for a button of the
+        // selected half, and only on the press.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF00, 0x10);          // action buttons selected
+        b.bus().tick(4);
+        b.bus().set_interrupt_flags(0);
+
+        b.bus().joypad().set(ButtonRight, true);   // the other half
+        b.bus().tick(4);
+        report((b.bus().interrupt_flags() & IntJoypad) == 0,
+               "no interrupt for a button of the deselected half", "an interrupt fired");
+
+        b.bus().joypad().set(ButtonA, true);
+        b.bus().tick(4);
+        report((b.bus().interrupt_flags() & IntJoypad) != 0,
+               "an interrupt when a selected button is pressed", "no interrupt fired");
+
+        b.bus().set_interrupt_flags(0);
+        b.bus().joypad().set(ButtonA, false);
+        b.bus().tick(4);
+        report((b.bus().interrupt_flags() & IntJoypad) == 0,
+               "and none when it is released", "releasing raised an interrupt");
     }
 
     // === OAM DMA ============================================================

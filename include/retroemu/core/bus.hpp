@@ -32,6 +32,7 @@
 #include "retroemu/core/cartridge.hpp"
 #include "retroemu/core/clock.hpp"
 #include "retroemu/core/dma.hpp"
+#include "retroemu/core/joypad.hpp"
 #include "retroemu/core/ppu.hpp"
 #include "retroemu/core/timer.hpp"
 #include "retroemu/core/types.hpp"
@@ -140,6 +141,8 @@ public:
     const Timer     &timer() const { return timer_; }
     Dma             &dma()         { return dma_; }
     const Dma       &dma() const   { return dma_; }
+    Joypad          &joypad()       { return joypad_; }
+    const Joypad    &joypad() const { return joypad_; }
     Cartridge       &cartridge()       { return cartridge_; }
     const Cartridge &cartridge() const { return cartridge_; }
 
@@ -159,6 +162,7 @@ private:
     Ppu       ppu_;
     Timer     timer_;
     Dma       dma_;
+    Joypad    joypad_;
     Clock     clock_;
     Model     model_ = Model::Dmg;
 
