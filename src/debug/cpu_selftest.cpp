@@ -492,11 +492,17 @@ int run_cpu_selftest(bool verbose)
 
         // Flags that make a conditional branch fall through: NZ and NC need
         // their flag set, Z and C need it clear.
+        // The mask must be 0xE7, not 0xC7: bit 5 belongs to the condition field,
+        // so it has to be cleared before comparing. With 0xC7 the JR line was
+        // dead code (bit 5 is not in that mask, so the test could never be
+        // true) and the three others also matched LDH and LD (nn),A by
+        // accident. Clang's -Wtautological-bitwise-compare caught it; GCC did
+        // not warn.
         auto flags_that_avoid_the_branch = [](u8 op) -> u8 {
-            const bool conditional = (op & 0xC7) == 0x20 ||   // JR cc
-                                     (op & 0xC7) == 0xC0 ||   // RET cc
-                                     (op & 0xC7) == 0xC2 ||   // JP cc
-                                     (op & 0xC7) == 0xC4;     // CALL cc
+            const bool conditional = (op & 0xE7) == 0x20 ||   // JR cc
+                                     (op & 0xE7) == 0xC0 ||   // RET cc
+                                     (op & 0xE7) == 0xC2 ||   // JP cc
+                                     (op & 0xE7) == 0xC4;     // CALL cc
             if (!conditional) return 0;
             const int cc = (op >> 3) & 0x03;
             return (cc == 0 || cc == 2) ? static_cast<u8>(FlagZ | FlagC) : 0;
@@ -511,10 +517,14 @@ int run_cpu_selftest(bool verbose)
                 if (!prefixed && is_unconditional_jump(opcode)) continue;
                 if (!prefixed && opcode == 0xCB) continue;   // covered by the CB pass
 
+                // The operand bytes are deliberately NOT zero. With 0x00 a
+                // taken relative jump lands on pc + 2, exactly where a
+                // fall-through lands, so a mistake in the branch setup would
+                // stay invisible. 0x10/0x20 makes the two outcomes differ.
                 Bench b;
                 const std::vector<u8> code =
-                    prefixed ? std::vector<u8>{0xCB, opcode, 0x00, 0x00}
-                             : std::vector<u8>{opcode, 0x00, 0x00, 0x00};
+                    prefixed ? std::vector<u8>{0xCB, opcode, 0x10, 0x20}
+                             : std::vector<u8>{opcode, 0x10, 0x20, 0x00};
                 if (!b.load(code)) continue;
 
                 b.cpu().regs().set_hl(0xC000);   // keep (HL) on writable memory
