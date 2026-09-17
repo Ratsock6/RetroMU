@@ -47,9 +47,10 @@ if [ ! -d "$BLARGG" ]; then
     [ "$fail" -eq 0 ] && exit 0 || exit 1
 fi
 
-# 02-interrupts needs the timer, which arrives in step 7. Listing it here
-# keeps the expectation explicit rather than silently skipping it.
-KNOWN_INCOMPLETE="02-interrupts"
+# Every test in the suite is expected to pass since step 7 added the timer.
+# The list is kept so that a future known-incomplete case can be declared
+# explicitly rather than silently skipped.
+KNOWN_INCOMPLETE=""
 
 passed=0
 failed=0
@@ -63,7 +64,7 @@ for rom in "$BLARGG"/*.gb; do
     if [ "$code" -eq 0 ]; then
         printf '  \033[1;32mPASS\033[0m  %s\n' "$name"
         passed=$((passed + 1))
-    elif printf '%s' "$KNOWN_INCOMPLETE" | grep -qF -- "$name"; then
+    elif [ -n "$KNOWN_INCOMPLETE" ] && printf '%s' "$KNOWN_INCOMPLETE" | grep -qF -- "$name"; then
         printf '  \033[1;33mKNOWN\033[0m %s (needs the timer, step 7)\n' "$name"
         expected=$((expected + 1))
     else
@@ -72,6 +73,17 @@ for rom in "$BLARGG"/*.gb; do
         failed=$((failed + 1))
     fi
 done
+
+# instr_timing lives outside cpu_instrs but is the other blargg ROM that
+# depends on the timer, so it is run here too.
+TIMING="$ROOT/roms-dev/instr_timing/instr_timing.gb"
+if [ -f "$TIMING" ]; then
+    if "$EMU" --run "$TIMING" --quiet --max-cycles 400000000 >/dev/null 2>&1; then
+        printf '  \033[1;32mPASS\033[0m  instr_timing\n'; passed=$((passed + 1))
+    else
+        printf '  \033[1;31mFAIL\033[0m  instr_timing\n'; failed=$((failed + 1))
+    fi
+fi
 
 echo
 printf '%d passed, %d failed, %d known-incomplete\n' "$passed" "$failed" "$expected"

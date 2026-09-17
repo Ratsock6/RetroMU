@@ -431,3 +431,70 @@ no trace at all.
 advances no clock and has no side effect (D15). The test suite verifies that
 two runs of the same ROM produce byte-identical traces, and that a traced run
 reaches the same state as an untraced one.
+
+---
+
+## D27 — The timer is modelled as one internal counter, not four registers
+
+**Context.** DIV, TIMA, TMA and TAC look like four independent registers. They
+are not, and every surprising behaviour the test bundle checks comes from that.
+
+**Decision.** A single 16-bit counter increments on every cycle. DIV is simply
+its upper byte, and TIMA counts the FALLING EDGES of one selected bit of that
+same counter, chosen by TAC. Three consequences fall out for free rather than
+needing special cases:
+
+- writing to DIV resets the whole counter, it does not store the value;
+- resetting DIV can increment TIMA, because clearing a watched bit that was
+  set is a falling edge;
+- changing TAC can do the same, for the same reason.
+
+The overflow delay is modelled explicitly: when TIMA passes 0xFF it reads
+0x00 for four cycles before TMA is copied in and the interrupt is requested.
+A write to TIMA inside that window cancels both.
+
+Implementing this any other way means bolting on one special case per quirk,
+and missing the ones nobody documented.
+
+---
+
+## D28 — The timer follows the CPU clock, the PPU does not
+
+**Context.** In CGB double-speed mode the CPU runs twice as fast.
+
+**Decision.** `Bus::tick` feeds the timer CPU-domain cycles and the PPU
+system-domain ones. DIV therefore does count twice as fast in double-speed
+mode, which is what the hardware does, while the screen keeps refreshing
+59.727 times per second. This is the separation decision D14 put in place at
+step 3, now actually being used.
+
+---
+
+## D29 — Ticking one cycle at a time
+
+**Context.** The falling-edge detector has to see every value the counter
+takes, or an edge can be missed.
+
+**Decision.** `Timer::tick` loops one cycle at a time rather than trying to
+jump ahead analytically. It is the only implementation that cannot miss an
+edge, and measurement says it costs nothing that matters: 60 emulated seconds
+run in 1.4 real seconds, about 42 times faster than the hardware, against a
+requirement of 1x (subject V.3, p.7).
+
+Optimising this before measuring would have traded correctness for speed the
+project does not need.
+
+---
+
+## D30 — mooneye verdicts are read from the registers
+
+**Context.** The bundle's acceptance ROMs print their result on screen, which
+needs a PPU, and do not use the link port.
+
+**Decision.** `--mooneye` implements the convention those ROMs follow: the
+registers hold 3, 5, 8, 13, 21, 34 on success and 0x42 everywhere on failure,
+followed by `LD B,B` as a software breakpoint. `LD B,B` does nothing on real
+hardware, which is why it was chosen as a marker.
+
+That lets the two step-7 acceptance ROMs be validated now rather than waiting
+for step 9, and the same command will read every other mooneye ROM later.

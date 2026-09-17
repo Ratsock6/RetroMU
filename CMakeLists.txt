@@ -55,6 +55,7 @@ add_executable(retroemu
     src/debug/tracer.cpp
     src/core/gameboy.cpp
     src/core/ppu.cpp
+    src/core/timer.cpp
 )
 
 target_include_directories(retroemu PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")

@@ -747,6 +747,74 @@ int run_tracehash(const std::vector<std::string> &roms, bool force_cgb,
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+//  Mooneye test protocol (step 7).
+// ---------------------------------------------------------------------------
+//  The bundle's mooneye ROMs do not report through the link port and their
+//  on-screen text needs a PPU we do not have yet. They do, however, use a
+//  convention: when a test ends, the registers are loaded with the start of
+//  the Fibonacci sequence on success, and the opcode LD B,B is executed as a
+//  software breakpoint. LD B,B does nothing on real hardware, which is why it
+//  was chosen as the marker.
+//
+//      success: B=3  C=5  D=8  E=13  H=21  L=34
+//      failure: every register holds 0x42
+// ---------------------------------------------------------------------------
+int run_mooneye(const std::vector<std::string> &roms, bool force_cgb,
+                retroemu::u64 max_cycles, bool verbose)
+{
+    int failures = 0;
+
+    for (const std::string &rom : roms) {
+        retroemu::GameBoy gb;
+        std::string error;
+        if (!gb.load(rom, force_cgb, error)) {
+            std::fprintf(stderr, "%s: %s\n", rom.c_str(), error.c_str());
+            ++failures;
+            continue;
+        }
+
+        bool reached_marker = false;
+        while (gb.bus().clock().t_cpu() < max_cycles) {
+            // LD B,B, the software breakpoint the test framework uses.
+            if (gb.bus().peek(gb.cpu().regs().pc) == 0x40) { reached_marker = true; break; }
+            gb.step();
+            if (gb.cpu().illegal() || gb.cpu().stopped()) break;
+        }
+
+        const retroemu::Registers &r = gb.cpu().regs();
+        const bool passed = reached_marker &&
+                            r.b == 3 && r.c == 5 && r.d == 8 &&
+                            r.e == 13 && r.h == 21 && r.l == 34;
+        const bool failed_explicitly = reached_marker &&
+                                       r.b == 0x42 && r.c == 0x42 && r.d == 0x42;
+
+        const char *name = rom.c_str();
+        if (passed) {
+            std::printf("  \033[1;32mPASS\033[0m  %s\n", name);
+        } else if (failed_explicitly) {
+            std::printf("  \033[1;31mFAIL\033[0m  %s  (the ROM reported a failure)\n", name);
+            ++failures;
+        } else if (!reached_marker) {
+            std::printf("  \033[1;31mFAIL\033[0m  %s  (never reached the end marker; "
+                        "PC=$%04X after %llu cycles)\n", name, r.pc,
+                        static_cast<unsigned long long>(gb.bus().clock().t_cpu()));
+            ++failures;
+        } else {
+            std::printf("  \033[1;31mFAIL\033[0m  %s\n"
+                        "        registers B=%u C=%u D=%u E=%u H=%u L=%u, "
+                        "expected 3 5 8 13 21 34\n",
+                        name, r.b, r.c, r.d, r.e, r.h, r.l);
+            ++failures;
+        }
+    }
+
+    if (verbose) {
+        std::printf("\n  %zu passed, %d failed\n", roms.size() - failures, failures);
+    }
+    return failures == 0 ? 0 : 1;
+}
+
 void print_usage(const char *prog)
 {
     std::printf(
@@ -770,6 +838,7 @@ void print_usage(const char *prog)
         "  --ly-stub              make LY read 0x90, for reference-log comparison\n"
         "  --tracediff <a> <b>    report the first divergence between two traces\n"
         "  --tracehash <rom>...   fingerprint of each ROM's first instructions\n"
+        "  --mooneye <rom>...     run mooneye tests and read their verdict\n"
         "  --cgb                  force CGB mode (used with --memtest)\n"
         "  --selftest [file.ppm]  check the graphics pipeline without a window\n"
         "  --scale N              window magnification factor (default: 4)\n"
@@ -841,7 +910,8 @@ int main(int argc, char *argv[])
         if (arg == "--selftest" || arg == "--info" || arg == "--list" ||
             arg == "--memtest"  || arg == "--run"  || arg == "--cpucheck" ||
             arg == "--debug"    || arg == "--discheck" ||
-            arg == "--trace"    || arg == "--tracediff" || arg == "--tracehash") {
+            arg == "--trace"    || arg == "--tracediff" || arg == "--tracehash" ||
+            arg == "--mooneye") {
             if (!action.empty()) {
                 std::fprintf(stderr, "%s and %s cannot be combined\n",
                              action.c_str(), arg.c_str());
@@ -872,6 +942,7 @@ int main(int argc, char *argv[])
         return retroemu::diff_traces(files[0], files[1], 5);
     }
     if (action == "--tracehash") return run_tracehash(files, force_cgb, trace_limit);
+    if (action == "--mooneye")   return run_mooneye(files, force_cgb, max_cycles, !quiet);
 
     // The remaining actions take exactly one ROM.
     if (files.empty()) {

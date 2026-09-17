@@ -53,6 +53,7 @@ void Bus::attach(Cartridge cartridge, Model model)
 void Bus::reset()
 {
     ppu_.reset();
+    timer_.reset(model_);
     clock_.reset();
     wram_.fill(0);
     hram_.fill(0);
@@ -66,7 +67,6 @@ void Bus::reset()
     // skips the boot sequence (ambiguity A3), so they are applied directly.
     io_[0x00] = 0xCF;   // JOYP: nothing pressed
     io_[0x02] = 0x7E;   // SC
-    io_[0x07] = 0xF8;   // TAC
     io_[0x0F] = 0xE1;   // IF
     io_[0x40] = 0x91;   // LCDC: screen on, background enabled
     io_[0x41] = 0x85;   // STAT
@@ -113,9 +113,12 @@ void Bus::tick(u32 t)
     // many elapsed. Each component is then fed from the domain it belongs to.
     const u32 t_sys = clock_.advance(t);
 
-    // The PPU never speeds up, so it gets system cycles, not CPU cycles.
-    // Steps 7 and 10 add timer_.tick(t) and dma_.tick(t_sys) here.
+    // Each component is fed from its own domain. The PPU never speeds up, so
+    // it gets system cycles. The timer follows the CPU clock, so it gets CPU
+    // cycles and does run twice as fast in CGB double-speed mode.
     ppu_.tick(t_sys);
+    if (timer_.tick(t)) request_interrupt(IntTimer);
+    // Step 10 adds dma_.tick(t_sys) here.
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +156,7 @@ u8 Bus::dispatch_read(u16 addr) const
             return 0xFF;
 
         case MemRegion::IoRegisters:
+            if (addr >= 0xFF04 && addr <= 0xFF07) return timer_.read(addr);
             if (addr == 0xFF0F) return static_cast<u8>(0xE0 | io_[0x0F]);
             if (addr == 0xFF44 && ly_stub_) return 0x90;   // see Bus::set_ly_stub
             if (addr == 0xFF4F && model_ == Model::Cgb) return ppu_.vram_bank_register();
@@ -209,6 +213,7 @@ void Bus::dispatch_write(u16 addr, u8 value)
             return;   // writes are dropped
 
         case MemRegion::IoRegisters:
+            if (addr >= 0xFF04 && addr <= 0xFF07) { timer_.write(addr, value); return; }
             if (addr == 0xFF01) { io_[0x01] = value; return; }        // SB: byte to send
             if (addr == 0xFF02) {                                       // SC: control
                 io_[0x02] = value;

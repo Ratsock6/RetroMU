@@ -32,6 +32,7 @@
 #include "retroemu/core/cartridge.hpp"
 #include "retroemu/core/clock.hpp"
 #include "retroemu/core/ppu.hpp"
+#include "retroemu/core/timer.hpp"
 #include "retroemu/core/types.hpp"
 
 namespace retroemu {
@@ -134,6 +135,8 @@ public:
 
     Ppu             &ppu()       { return ppu_; }
     const Ppu       &ppu() const { return ppu_; }
+    Timer           &timer()       { return timer_; }
+    const Timer     &timer() const { return timer_; }
     Cartridge       &cartridge()       { return cartridge_; }
     const Cartridge &cartridge() const { return cartridge_; }
 
@@ -147,6 +150,7 @@ private:
 
     Cartridge cartridge_;
     Ppu       ppu_;
+    Timer     timer_;
     Clock     clock_;
     Model     model_ = Model::Dmg;
 

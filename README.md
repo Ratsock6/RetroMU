@@ -56,6 +56,7 @@ Actual prerequisites: a C++17 compiler (GCC 7+ or Clang 6+), CMake 3.16+, and
 ./build/retroemu --debug roms/acid2/dmg-acid2.gb   # interactive debugger
 ./build/retroemu --discheck roms/*/*.gb            # disassembler vs CPU
 ./build/retroemu --trace roms/acid2/dmg-acid2.gb --trace-limit 20
+./build/retroemu --mooneye roms/mooneye/acceptance/*.gb   # run bundle acceptance ROMs
 ./build/retroemu                      # open the window
 ./build/retroemu --scale 6            # window magnified x6
 ./build/retroemu --selftest           # check the graphics pipeline, no window
@@ -82,7 +83,7 @@ the test bundle before moving on.
 | 4 | CPU: registers, flags, instruction set | done |
 | 5 | Disassembler and debugger *(subject V.1, V.2)* | done |
 | 6 | Trace log and differential validation | done |
-| 7 | Interrupts and timer | todo |
+| 7 | Interrupts and timer | done |
 | 8 | PPU: state machine | todo |
 | 9 | PPU: background, window, sprites, palettes *(subject V.2)* | todo |
 | 10 | OAM DMA | todo |
@@ -102,6 +103,7 @@ the test bundle before moving on.
 ./tests/run_cpu_tests.sh          # step 4: instruction set       (102 checks + blargg)
 ./tests/run_debug_tests.sh        # step 5: disassembler, debugger (22 checks)
 ./tests/run_trace_tests.sh        # step 6: tracer and fingerprints (11 checks)
+./tests/run_timer_tests.sh        # step 7: interrupts and timer   (8 checks)
 ```
 
 `run_cartridge_tests.sh` checks the parsed summary of the nine bundled ROMs
@@ -126,6 +128,20 @@ separately:
 They report their verdict through the link port rather than the screen, which
 is what makes it possible to validate the whole instruction set before any
 rendering exists.
+
+### Test ROM verdicts
+
+The bundle's mooneye ROMs report neither over the link port nor in a way that
+can be read without a screen. They use a convention instead: on success the
+registers are loaded with the start of the Fibonacci sequence, then `LD B,B`
+is executed as a software breakpoint. `--mooneye` implements that protocol:
+
+```bash
+./build/retroemu --mooneye roms/mooneye/acceptance/*.gb
+```
+
+blargg's ROMs report through the link port, so `--run` prints their verdict
+directly.
 
 ### Differential tracing
 
@@ -221,6 +237,7 @@ RetroEmu/
 │       ├── cartridge.cpp   ROM loading and header parsing
 │       ├── bus.cpp         address dispatch and the master clock
 │       ├── ppu.cpp         owns VRAM and OAM (rendering from step 9)
+│       ├── timer.cpp       DIV, TIMA, TMA, TAC
 │       ├── cpu.cpp         the instruction set
 │       └── gameboy.cpp     the assembled machine
 │   └── debug/              debugger-side tooling

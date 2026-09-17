@@ -466,6 +466,118 @@ int run_cpu_selftest(bool verbose)
                "the CPU halted anyway");
     }
 
+    // === Timer ==============================================================
+    //  DIV is the upper byte of one internal 16-bit counter, and TIMA counts
+    //  the falling edges of a selected bit of that same counter. Everything
+    //  surprising about this component follows from those two facts.
+    if (verbose) std::printf("\n== timer ==\n");
+    {
+        Bench b; b.load({0x00});
+        check_u8("DIV reads 0xAB after boot", b.bus().timer().div(), 0xAB);
+    }
+    {
+        // DIV is the counter's high byte, so it moves once every 256 cycles.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF04, 0x00);                 // reset the counter
+        const u8 before = b.bus().timer().div();
+        b.bus().tick(255);
+        check_u8("DIV has not moved after 255 cycles", b.bus().timer().div(), before);
+        b.bus().tick(1);
+        check_u8("DIV moves on the 256th", b.bus().timer().div(), static_cast<u8>(before + 1));
+    }
+    {
+        // Writing to DIV does not store the value: it zeroes the whole counter.
+        Bench b; b.load({0x00});
+        b.bus().tick(1000);
+        b.bus().poke(0xFF04, 0x37);
+        check_u8("writing to DIV resets it to zero", b.bus().timer().div(), 0x00);
+    }
+    {
+        // Each TAC setting watches a different bit, so TIMA ticks at a
+        // different rate. Note the order: 01 is the FASTEST, not the slowest.
+        struct Rate { u8 tac; u32 cycles; const char *name; };
+        const Rate rates[] = {
+            {0x05, 16,   "TAC=01 increments TIMA every 16 cycles"},
+            {0x06, 64,   "TAC=10 increments TIMA every 64 cycles"},
+            {0x07, 256,  "TAC=11 increments TIMA every 256 cycles"},
+            {0x04, 1024, "TAC=00 increments TIMA every 1024 cycles"},
+        };
+        for (const Rate &rate : rates) {
+            Bench b; b.load({0x00});
+            // Order matters. Resetting DIV can itself increment TIMA (that
+            // is the quirk tested further down), so TIMA is zeroed AFTER the
+            // counter, never before.
+            b.bus().poke(0xFF07, rate.tac);
+            b.bus().poke(0xFF04, 0x00);             // counter to zero
+            b.bus().poke(0xFF05, 0x00);
+            b.bus().tick(rate.cycles - 1);
+            const bool early = b.bus().peek(0xFF05) != 0x00;
+            b.bus().tick(1);
+            const bool ontime = b.bus().peek(0xFF05) == 0x01;
+            report(!early && ontime, rate.name,
+                   early ? "TIMA moved too early" : "TIMA did not move on time");
+        }
+    }
+    {
+        // Bit 2 of TAC is the enable. With it clear, nothing happens at all.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF07, 0x01);                 // fastest rate, but disabled
+        b.bus().poke(0xFF04, 0x00);
+        b.bus().poke(0xFF05, 0x00);
+        b.bus().tick(4096);
+        check_u8("a disabled timer never increments TIMA", b.bus().peek(0xFF05), 0x00);
+    }
+    {
+        // The consequence nobody expects: resetting DIV while the watched bit
+        // is high is itself a falling edge, so TIMA increments.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF07, 0x05);                 // watch bit 3
+        b.bus().poke(0xFF04, 0x00);                 // counter to zero first
+        b.bus().poke(0xFF05, 0x00);                 // then TIMA
+        b.bus().tick(8);                            // bit 3 is now 1
+        b.bus().poke(0xFF04, 0x00);                 // reset: bit 3 falls to 0
+        check_u8("resetting DIV can increment TIMA", b.bus().peek(0xFF05), 0x01);
+    }
+    {
+        // Overflow: TIMA reloads from TMA and requests the timer interrupt.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF07, 0x05);                 // fastest rate
+        b.bus().poke(0xFF04, 0x00);                 // counter to zero first
+        b.bus().poke(0xFF06, 0x7E);                 // TMA
+        b.bus().poke(0xFF05, 0xFF);                 // TIMA about to overflow
+        b.bus().set_interrupt_flags(0);
+        b.bus().tick(16);                           // one increment: 0xFF -> overflow
+        check_u8("TIMA reads 0x00 for one cycle after overflowing", b.bus().peek(0xFF05), 0x00);
+        report((b.bus().interrupt_flags() & IntTimer) == 0,
+               "no interrupt yet during that window", "the interrupt fired too early");
+        b.bus().tick(4);
+        check_u8("then TMA is copied into TIMA", b.bus().peek(0xFF05), 0x7E);
+        report((b.bus().interrupt_flags() & IntTimer) != 0,
+               "and the timer interrupt is requested", "the interrupt never fired");
+    }
+    {
+        // Writing to TIMA inside the reload window cancels both.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF07, 0x05);
+        b.bus().poke(0xFF04, 0x00);
+        b.bus().poke(0xFF06, 0x7E);
+        b.bus().poke(0xFF05, 0xFF);
+        b.bus().set_interrupt_flags(0);
+        b.bus().tick(16);                           // overflow, reload pending
+        b.bus().poke(0xFF05, 0x11);                 // cancel it
+        b.bus().tick(8);
+        check_u8("writing TIMA during the window cancels the reload",
+                 b.bus().peek(0xFF05), 0x11);
+        report((b.bus().interrupt_flags() & IntTimer) == 0,
+               "and cancels the interrupt with it", "the interrupt fired anyway");
+    }
+    {
+        // The top five bits of TAC are not wired and read as 1.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF07, 0x05);
+        check_u8("unused TAC bits read as 1", b.bus().peek(0xFF07), 0xFD);
+    }
+
     // === The disassembler must agree with the CPU on every opcode ==========
     //  Section V.1 of the subject requires the debugger to display the next
     //  instruction. That display is only trustworthy if the disassembler's
