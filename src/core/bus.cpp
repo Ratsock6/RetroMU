@@ -52,7 +52,7 @@ void Bus::attach(Cartridge cartridge, Model model)
 
 void Bus::reset()
 {
-    ppu_.reset();
+    ppu_.reset(model_);
     timer_.reset(model_);
     clock_.reset();
     wram_.fill(0);
@@ -68,11 +68,6 @@ void Bus::reset()
     io_[0x00] = 0xCF;   // JOYP: nothing pressed
     io_[0x02] = 0x7E;   // SC
     io_[0x0F] = 0xE1;   // IF
-    io_[0x40] = 0x91;   // LCDC: screen on, background enabled
-    io_[0x41] = 0x85;   // STAT
-    io_[0x47] = 0xFC;   // BGP
-    io_[0x48] = 0xFF;   // OBP0
-    io_[0x49] = 0xFF;   // OBP1
 }
 
 std::size_t Bus::wram_bank() const
@@ -117,7 +112,9 @@ void Bus::tick(u32 t)
     // it gets system cycles. The timer follows the CPU clock, so it gets CPU
     // cycles and does run twice as fast in CGB double-speed mode.
     ppu_.tick(t_sys);
-    if (timer_.tick(t)) request_interrupt(IntTimer);
+    if (ppu_.take_vblank_irq()) request_interrupt(IntVBlank);
+    if (ppu_.take_stat_irq())   request_interrupt(IntStat);
+    if (timer_.tick(t))         request_interrupt(IntTimer);
     // Step 10 adds dma_.tick(t_sys) here.
 }
 
@@ -156,9 +153,12 @@ u8 Bus::dispatch_read(u16 addr) const
             return 0xFF;
 
         case MemRegion::IoRegisters:
-            if (addr >= 0xFF04 && addr <= 0xFF07) return timer_.read(addr);
-            if (addr == 0xFF0F) return static_cast<u8>(0xE0 | io_[0x0F]);
+            // The LY stub must be tested BEFORE the PPU is consulted, or the
+            // PPU answers first and the stub becomes dead code.
             if (addr == 0xFF44 && ly_stub_) return 0x90;   // see Bus::set_ly_stub
+            if (addr >= 0xFF04 && addr <= 0xFF07) return timer_.read(addr);
+            if (addr >= 0xFF40 && addr <= 0xFF4B && addr != 0xFF46) return ppu_.read(addr);
+            if (addr == 0xFF0F) return static_cast<u8>(0xE0 | io_[0x0F]);
             if (addr == 0xFF4F && model_ == Model::Cgb) return ppu_.vram_bank_register();
             if (addr == 0xFF70 && model_ == Model::Cgb) return svbk_;
             // Every other register is still a plain byte; steps 7, 8 and 11
@@ -214,6 +214,7 @@ void Bus::dispatch_write(u16 addr, u8 value)
 
         case MemRegion::IoRegisters:
             if (addr >= 0xFF04 && addr <= 0xFF07) { timer_.write(addr, value); return; }
+            if (addr >= 0xFF40 && addr <= 0xFF4B && addr != 0xFF46) { ppu_.write(addr, value); return; }
             if (addr == 0xFF01) { io_[0x01] = value; return; }        // SB: byte to send
             if (addr == 0xFF02) {                                       // SC: control
                 io_[0x02] = value;

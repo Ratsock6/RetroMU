@@ -84,7 +84,7 @@ the test bundle before moving on.
 | 5 | Disassembler and debugger *(subject V.1, V.2)* | done |
 | 6 | Trace log and differential validation | done |
 | 7 | Interrupts and timer | done |
-| 8 | PPU: state machine | todo |
+| 8 | PPU: state machine | done |
 | 9 | PPU: background, window, sprites, palettes *(subject V.2)* | todo |
 | 10 | OAM DMA | todo |
 | 11 | Real-time loop and inputs *(subject V.3, V.4)* | todo |
@@ -104,6 +104,7 @@ the test bundle before moving on.
 ./tests/run_debug_tests.sh        # step 5: disassembler, debugger (22 checks)
 ./tests/run_trace_tests.sh        # step 6: tracer and fingerprints (11 checks)
 ./tests/run_timer_tests.sh        # step 7: interrupts and timer   (8 checks)
+./tests/run_ppu_tests.sh          # step 8: PPU state machine     (11 checks)
 ```
 
 `run_cartridge_tests.sh` checks the parsed summary of the nine bundled ROMs

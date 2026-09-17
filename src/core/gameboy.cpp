@@ -54,6 +54,21 @@ void GameBoy::run_system_cycles(u64 t_sys)
     }
 }
 
+void GameBoy::run_frame()
+{
+    // Now that the PPU sweeps the screen, a frame ends when it says so rather
+    // than after a fixed cycle count (decision D22). The cap is a guard: with
+    // the screen turned off the PPU signals nothing, and a frame would never
+    // end.
+    const u64 cap = bus_.clock().t_sys() + 2 * kTCyclesPerFrame;
+    for (;;) {
+        step();
+        if (cpu_.illegal() || cpu_.stopped()) return;
+        if (bus_.ppu().take_frame_ready()) return;
+        if (bus_.clock().t_sys() >= cap) return;
+    }
+}
+
 void GameBoy::run_seconds(double seconds)
 {
     run_system_cycles(static_cast<u64>(seconds * kSystemClockHz));

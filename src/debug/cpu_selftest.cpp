@@ -578,6 +578,149 @@ int run_cpu_selftest(bool verbose)
         check_u8("unused TAC bits read as 1", b.bus().peek(0xFF07), 0xFD);
     }
 
+    // === PPU state machine ==================================================
+    //  The screen is swept line by line, 456 dots each, cycling through three
+    //  modes on the visible lines and sitting in VBlank for ten more.
+    if (verbose) std::printf("\n== PPU state machine ==\n");
+    {
+        Bench b; b.load({0x00});
+        check_u8("the screen is on after boot", b.bus().ppu().lcd_on() ? 1 : 0, 1);
+        check_u8("LY starts at 0", b.bus().ppu().ly(), 0);
+        report(b.bus().ppu().mode() == PpuMode::OamScan,
+               "a line starts in mode 2, the OAM scan", "wrong starting mode");
+    }
+    {
+        // The three modes of a visible line, at their documented boundaries.
+        Bench b; b.load({0x00});
+        b.bus().tick(79);
+        report(b.bus().ppu().mode() == PpuMode::OamScan,
+               "mode 2 lasts 80 dots", "left mode 2 too early");
+        b.bus().tick(1);
+        report(b.bus().ppu().mode() == PpuMode::Drawing,
+               "then mode 3 begins", "did not enter mode 3");
+        b.bus().tick(171);
+        report(b.bus().ppu().mode() == PpuMode::Drawing,
+               "mode 3 lasts 172 dots", "left mode 3 too early");
+        b.bus().tick(1);
+        report(b.bus().ppu().mode() == PpuMode::HBlank,
+               "then mode 0, HBlank", "did not enter HBlank");
+    }
+    {
+        Bench b; b.load({0x00});
+        b.bus().tick(455);
+        check_u8("LY has not moved after 455 dots", b.bus().ppu().ly(), 0);
+        b.bus().tick(1);
+        check_u8("a line is exactly 456 dots", b.bus().ppu().ly(), 1);
+    }
+    {
+        // 144 visible lines, then VBlank.
+        Bench b; b.load({0x00});
+        b.bus().set_interrupt_flags(0);
+        b.bus().tick(144 * kDotsPerLine - 1);
+        check_u8("LY is 143 on the last visible line", b.bus().ppu().ly(), 143);
+        report((b.bus().interrupt_flags() & IntVBlank) == 0,
+               "no VBlank interrupt yet", "VBlank fired too early");
+        b.bus().tick(1);
+        check_u8("LY reaches 144", b.bus().ppu().ly(), 144);
+        report(b.bus().ppu().mode() == PpuMode::VBlank,
+               "and the PPU enters VBlank", "did not enter VBlank");
+        report((b.bus().interrupt_flags() & IntVBlank) != 0,
+               "the VBlank interrupt is requested", "VBlank never fired");
+    }
+    {
+        // 154 lines in total: 144 visible plus 10 of VBlank.
+        Bench b; b.load({0x00});
+        b.bus().tick(153 * kDotsPerLine);
+        check_u8("LY reaches 153, the last line", b.bus().ppu().ly(), 153);
+        b.bus().tick(kDotsPerLine);
+        check_u8("then wraps back to 0", b.bus().ppu().ly(), 0);
+        check_u8("one frame was completed", static_cast<u8>(b.bus().ppu().frames()), 1);
+    }
+    {
+        // 154 x 456 = 70224 dots, which is 59.727 frames per second.
+        Bench b; b.load({0x00});
+        b.bus().tick(kTCyclesPerFrame);
+        check_u8("a frame is 70224 dots", static_cast<u8>(b.bus().ppu().frames()), 1);
+        check_u8("and LY is back at 0", b.bus().ppu().ly(), 0);
+    }
+    {
+        // The refresh rate, measured with nothing else interfering: one
+        // emulated second is 4194304 dots, which is 59.727 frames.
+        Bench b; b.load({0x00});
+        b.bus().tick(kSystemClockHz);
+        check_u8("59 frames are drawn in one emulated second",
+                 static_cast<u8>(b.bus().ppu().frames()), 59);
+    }
+    {
+        // STAT reports the mode and the LY==LYC comparison, whatever was
+        // written to it. Bit 7 is not wired and reads as 1.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF45, 0x00);                 // LYC = 0, and LY is 0
+        const u8 stat = b.bus().peek(0xFF41);
+        report((stat & 0x80) != 0, "STAT bit 7 reads as 1", "bit 7 was clear");
+        report((stat & 0x04) != 0, "STAT reports LY == LYC", "the LYC flag was clear");
+        report((stat & 0x03) == static_cast<u8>(PpuMode::OamScan),
+               "STAT reports the current mode", "wrong mode in STAT");
+        b.bus().poke(0xFF45, 0x42);                 // LYC no longer matches
+        report((b.bus().peek(0xFF41) & 0x04) == 0,
+               "and clears the flag when they differ", "the LYC flag stayed set");
+    }
+    {
+        // The STAT interrupt fires on a RISING edge of the OR of its enabled
+        // sources, so two overlapping events give one interrupt, not two.
+        // Order matters: LY is 0 at reset, so setting LYC to 5 BEFORE enabling
+        // the source avoids an immediate match. Enabling first would raise the
+        // interrupt straight away, which is correct hardware behaviour and is
+        // checked separately below.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF45, 0x05);                 // fire when LY reaches 5
+        b.bus().poke(0xFF41, 0x40);                 // enable the LYC source
+        b.bus().set_interrupt_flags(0);
+        b.bus().tick(4 * kDotsPerLine);
+        report((b.bus().interrupt_flags() & IntStat) == 0,
+               "no STAT interrupt before the match", "STAT fired too early");
+        b.bus().tick(kDotsPerLine);                 // LY becomes 5
+        report((b.bus().interrupt_flags() & IntStat) != 0,
+               "a STAT interrupt on the LYC match", "STAT never fired");
+        b.bus().set_interrupt_flags(0);
+        b.bus().tick(10);                           // still on line 5
+        report((b.bus().interrupt_flags() & IntStat) == 0,
+               "and only once while the match holds", "STAT fired again on the same line");
+    }
+    {
+        // Enabling a STAT source while its condition is ALREADY true is a
+        // rising edge of the line, so the interrupt fires immediately. Real
+        // behaviour, and a classic source of unexpected interrupts.
+        Bench b; b.load({0x00});
+        b.bus().poke(0xFF45, 0x00);                 // LYC = 0, and LY is already 0
+        b.bus().set_interrupt_flags(0);
+        b.bus().poke(0xFF41, 0x40);                 // enable the source now
+        b.bus().tick(4);
+        report((b.bus().interrupt_flags() & IntStat) != 0,
+               "enabling a source whose condition already holds fires at once",
+               "no interrupt was raised");
+    }
+    {
+        // Turning the screen off stops the sweep. Games do this before
+        // rewriting video memory in bulk.
+        Bench b; b.load({0x00});
+        b.bus().tick(3 * kDotsPerLine);
+        b.bus().poke(0xFF40, 0x11);                 // clear bit 7
+        check_u8("LY reads 0 while the screen is off", b.bus().peek(0xFF44), 0);
+        b.bus().tick(10 * kDotsPerLine);
+        check_u8("and stays there: nothing is swept", b.bus().peek(0xFF44), 0);
+        b.bus().poke(0xFF40, 0x91);                 // back on
+        b.bus().tick(kDotsPerLine);
+        check_u8("turning it back on restarts the sweep", b.bus().peek(0xFF44), 1);
+    }
+    {
+        Bench b; b.load({0x00});
+        b.bus().tick(2 * kDotsPerLine);
+        const u8 before = b.bus().peek(0xFF44);
+        b.bus().poke(0xFF44, 0x77);
+        check_u8("LY is read-only", b.bus().peek(0xFF44), before);
+    }
+
     // === The disassembler must agree with the CPU on every opcode ==========
     //  Section V.1 of the subject requires the debugger to display the next
     //  instruction. That display is only trustworthy if the disassembler's

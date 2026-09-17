@@ -35,9 +35,9 @@ public:
     // frame in CGB double-speed mode.
     void run_system_cycles(u64 t_sys);
 
-    // One frame is 70224 system cycles, which is 59.727 frames per second.
-    // Step 8 replaces this with "run until the PPU signals VBlank".
-    void run_frame() { run_system_cycles(kTCyclesPerFrame); }
+    // Run until the PPU completes a frame. Falls back to a cycle cap when the
+    // screen is off, since nothing would ever signal.
+    void run_frame();
     void run_seconds(double seconds);
 
     bool  loaded() const { return bus_.has_cartridge(); }

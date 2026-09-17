@@ -74,8 +74,11 @@ void print_state(const GameBoy &gb)
                 clk.double_speed() ? "   (double speed: the CPU runs twice as fast)" : "");
     std::printf("  emulated     %.4f s\n",
                 static_cast<double>(clk.t_sys()) / kSystemClockHz);
-    std::printf("  frames       %.2f\n",
-                static_cast<double>(clk.t_sys()) / kTCyclesPerFrame);
+    std::printf("  frames drawn %llu\n",
+                static_cast<unsigned long long>(gb.bus().ppu().frames()));
+    std::printf("  screen       %s, LY %u, mode %s\n",
+                gb.bus().ppu().lcd_on() ? "on" : "off",
+                gb.bus().ppu().ly(), to_string(gb.bus().ppu().mode()));
     std::printf("  bus accesses %llu\n", static_cast<unsigned long long>(gb.bus().access_count()));
     std::printf("  cartridge    %s\n", gb.bus().cartridge().path().c_str());
 

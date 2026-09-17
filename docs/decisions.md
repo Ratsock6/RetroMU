@@ -498,3 +498,68 @@ hardware, which is why it was chosen as a marker.
 
 That lets the two step-7 acceptance ROMs be validated now rather than waiting
 for step 9, and the same command will read every other mooneye ROM later.
+
+---
+
+## D31 — The PPU sweeps line by line from the start
+
+**Context.** Step 8 could have been skipped: a renderer that draws the whole
+image once per frame would produce something on screen sooner.
+
+**Decision.** The mode 2 / 3 / 0 sweep and the LY counter are implemented
+first, before any pixel. Two reasons, both structural rather than cosmetic:
+
+- LY is what games synchronise on. dmg-acid2 spins on `LDH A,($44)` /
+  `CP $90` / `JR NZ,-6` until LY reaches 144, which the step 6 tracer located
+  at instruction 12. Without the sweep, nothing runs far enough to draw.
+- VBlank is the only window where writing video memory is safe, so games do
+  all their work inside the interrupt it raises. No VBlank means no game.
+
+The sweep also gives step 9 the place to hook scanline rendering (D5) without
+restructuring anything.
+
+---
+
+## D32 — The STAT interrupt fires on a rising edge, not on each event
+
+**Context.** STAT can be told to interrupt on four different conditions.
+
+**Decision.** All enabled sources are OR-ed into one internal line, and only a
+0-to-1 transition raises the interrupt. Two conditions overlapping therefore
+give one interrupt, not two.
+
+A consequence worth knowing, and now covered by a test: enabling a source
+whose condition already holds fires immediately, because that too is a rising
+edge. It bit the test suite before it was understood.
+
+---
+
+## D33 — VRAM and OAM blocking is deliberately not implemented
+
+**Context.** On real hardware VRAM is unreadable during mode 3 and OAM during
+modes 2 and 3; reads return 0xFF and writes are dropped.
+
+**Decision.** Not implemented for now. No ROM in the subject's bundle tests
+it, and being permissive can only make a well-behaved game work, never break
+one: games already confine their video writes to VBlank precisely because of
+the blocking. Implementing it with mode timings that are not yet exact would
+be the riskier choice.
+
+To revisit if a test ever demands it, in which case mode 3's variable length
+needs to be modelled first.
+
+---
+
+## D34 — A frame ends when the PPU says so
+
+**Context.** Until now `run_frame` advanced a fixed 70224 system cycles (D22).
+
+**Decision.** It now runs until the PPU signals a completed frame, which
+happens when LY reaches 144 and the image is finished, at 65664 cycles into
+the frame. A cycle cap remains as a guard, because a game that turns the
+screen off signals nothing and would otherwise never return.
+
+That last case is real and visible: mooneye's ROMs and dmg-acid2 both turn the
+screen off while they rewrite video memory, which is why one emulated second
+draws about 52 images rather than 59 for those ROMs. The hardware's 59.727
+frames per second is verified independently of any ROM inside --cpucheck.

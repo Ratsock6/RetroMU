@@ -63,8 +63,11 @@ expect "a passing ROM is recognised"  "PASS" \
        "$("$EMU" --mooneye roms/mooneye/acceptance/div_timing.gb --max-cycles 60000000 2>&1)"
 expect "a failing ROM is recognised"  "the ROM reported a failure" \
        "$("$EMU" --mooneye roms/mooneye/acceptance/oam_dma/basic.gb --max-cycles 60000000 2>&1)"
+# A tiny cycle budget guarantees the marker is never reached. dmg-acid2 is not
+# used here: it contains an LD B,B of its own, which it uses to tell a debugger
+# the screen is ready to be compared.
 expect "a ROM that never finishes is reported" "never reached the end marker" \
-       "$("$EMU" --mooneye roms/acid2/dmg-acid2.gb --max-cycles 2000000 2>&1)"
+       "$("$EMU" --mooneye roms/mooneye/acceptance/div_timing.gb --max-cycles 1000 2>&1)"
 
 # --- Built-in timer checks ---------------------------------------------------
 echo

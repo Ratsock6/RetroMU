@@ -56,11 +56,23 @@ echo "== subject V.2: one frame and one second =="
 
 OUT="$(printf 'f\ni\nq\n' | "$EMU" --debug "$ROM" 2>&1)"
 expect "one frame runs"                     "ran 1 frame(s)" "$OUT"
-expect "the clock advanced by a frame"      "frames       1.0" "$OUT"
+expect "one image was drawn"                "frames drawn 1" "$OUT"
 
 OUT="$(printf 't\ni\nq\n' | "$EMU" --debug "$ROM" 2>&1)"
 expect "one second of emulation runs"       "ran 1 second(s)" "$OUT"
-expect "roughly 60 frames elapsed"          "frames       59." "$OUT"
+
+# The exact count is ROM-dependent: a game that turns the screen off while it
+# rewrites video memory draws nothing during that time, and dmg-acid2 does
+# exactly that. The 59.727 frames per second of the hardware is checked
+# independently of any ROM inside --cpucheck.
+DRAWN="$(printf '%s' "$OUT" | grep -oE 'frames drawn [0-9]+' | head -1 | grep -oE '[0-9]+')"
+if [ -n "$DRAWN" ] && [ "$DRAWN" -ge 40 ] && [ "$DRAWN" -le 60 ]; then
+    printf '  \033[1;32mPASS\033[0m  a plausible number of images was drawn (%s)\n' "$DRAWN"
+    pass=$((pass + 1))
+else
+    printf '  \033[1;31mFAIL\033[0m  images drawn in one second: %s, expected 40 to 60\n' "${DRAWN:-none}"
+    fail=$((fail + 1))
+fi
 
 # --- Disassembly listing ----------------------------------------------------
 echo
